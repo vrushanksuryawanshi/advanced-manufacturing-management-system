@@ -1,113 +1,405 @@
-# ForgeFlow — Advanced Manufacturing Management System
+# ForgeFlow
 
-A working first version of the application described in the supplied 35-page plan. It has a shared SQLite database, a Python/Flask backend, and responsive manager, operator and client workspaces. It is not connected to physical machine controllers.
+**Advanced Manufacturing Management System**
 
-## Start on this computer
+ForgeFlow is a responsive manufacturing operations application for planning production routes, scheduling shared machines, tracing lots with QR codes, recording shop-floor work, managing quality checks and warehouse addresses, and sharing approved progress with clients.
 
-Dependencies have been installed in this workspace. Open **Start Demo.bat**, then visit **http://127.0.0.1:5000**. Keep the terminal window open while using the application. If a server is already running on port 5000, use that browser address instead of starting another copy.
+It gives managers, operators, quality checkers, warehouse staff, and clients one traceable workflow from order creation to dispatch.
 
-On a new computer, install Python 3.11 or newer, run **Setup.bat** once, then **Start Demo.bat**. The QR scanner is already included in `static/vendor`; Node.js is only needed for browser tests, not to run the application.
+> Current release: [v1.0.0](https://github.com/vrushanksuryawanshi/advanced-manufacturing-management-system/releases/tag/v1.0.0)
+>
+> Stack: Python, Flask, SQLite, Waitress, HTML, CSS, and browser-native JavaScript
+>
+> Interfaces: responsive desktop, tablet, and mobile workspaces
 
-Demo accounts (all use password **FactoryDemo123!**):
+## Contents
 
-| Role | Email |
-| --- | --- |
-| Manager | manager@demo.local |
-| Operator | operator@demo.local |
-| Client | client@demo.local |
-| Second client, to demonstrate isolation | other-client@demo.local |
+- [What the system solves](#what-the-system-solves)
+- [Real-world workflow](#real-world-workflow)
+- [Roles and permissions](#roles-and-permissions)
+- [Features](#features)
+- [Quick start](#quick-start)
+- [Using the application](#using-the-application)
+- [Scheduling and analytics](#scheduling-and-analytics)
+- [Architecture and data](#architecture-and-data)
+- [Configuration](#configuration)
+- [Security](#security)
+- [Testing](#testing)
+- [Deployment and backup](#deployment-and-backup)
+- [Current boundaries](#current-boundaries)
+- [Troubleshooting](#troubleshooting)
 
-Demo data is created only when `--demo` is used on an empty database. Starting again preserves your work. Sample orders start waiting; utilization and performance are calculated from recorded activity, not fabricated sample measurements.
+## What the system solves
 
-## Try the full workflow
+Production information is often split between paper job cards, spreadsheets, verbal updates, and separate quality or warehouse records. ForgeFlow connects that information so the factory can answer:
 
-1. Sign in as the manager. In **Team & access**, create client accounts; the app emails each client their email address and generated temporary password. Staff register from the sign-in page as a **Machine operator**, **Quality checker**, or **Warehouse manager**. Each role sees only the appropriate stations, and a manager must approve the registration.
-2. Add machines in **Machines**, including a quality inspection station and a storage station.
-3. Add a product in **Products & routes**. Open **Build route** and click machines on the floor in production order, then QC, then a warehouse. Select an available warehouse address, such as **1/4**. Set minutes per lot, transition minutes, and work instructions. Save the route; opening the product shows its saved path and highlights the selected stations.
-4. In **Production orders**, choose **New order**, select the client and route version, and enter quantity, units per lot, priority and required date.
-5. Choose **Confirm route & generate QR**. The system creates an immutable route snapshot, divides the quantity into lots, generates one unique QR for each lot, and opens printable labels. The final lot may be smaller.
-6. Print and attach the labels. The **same label follows the lot throughout its entire route**. It identifies the lot; it does not automatically start or finish work.
-7. Sign in as the operator on another browser or device. Choose **Scan a lot**. Scan the label, scan a saved image, or enter its printed lot code. Review the instructions and choose **Start operation**. Scan again after performing the work and choose **Complete operation**.
-8. Each machine operator handles their assigned machine. The quality checker records inspection results. A failed QC result puts the lot on hold; the manager must authorize reinspection. After QC passes, the warehouse manager scans and receives the lot at its reserved address.
-9. The manager can open **Machine schedule**, select a waiting operation, and prioritize it with a reason. All downstream forecasts update. Running work is never interrupted.
-10. Open an order and choose **Approve client ETA**. The client sees current progress and the most recently approved completion estimate. Approve a revised ETA when a forecast changes materially.
+- What is being produced now, and where is each lot?
+- Which operation should run next on each machine?
+- What is waiting, blocked, delayed, or on quality hold?
+- Who started and completed each process?
+- How did actual time compare with the plan and historical work?
+- Where is finished stock stored?
+- What completion estimate has been approved for the client?
 
-## Factory floor and warehouse addresses
+ForgeFlow plans and records the work around physical equipment. It does not control CNC machines, PLCs, or safety systems.
 
-**Factory floor** shows a schematic equipment layout, not a measured building plan. The demo includes M1–M12, QC, and WH. Managers can use **Add station** to add any further machine codes, inspection stations, or warehouses; there is no M12 limit. The layout expands automatically.
+## Real-world workflow
 
-**Products & routes → Open product** shows the full saved sequence, highlighted equipment, step instructions, and warehouse address. **Revise route** creates a new version. Existing orders retain their confirmed steps and warehouse destination.
+For an order of 500 precision gears, a manager can select this saved route:
 
-Warehouses start with three rows of ten addresses: **1/1–1/10**, **2/1–2/10**, and **3/1–3/10**. Use **Warehouse → Add row** to extend a warehouse. The availability view distinguishes available, reserved, and occupied addresses.
-
-A saved product route specifies a preferred address. Creating an order reserves an available address for all its lots; if the preferred address is taken, choose another. The server prevents two orders reserving the same address, including simultaneous submissions. Addresses become occupied when stock is received. The assigned warehouse manager can open the address and enter a dispatch reference to release it after every lot in that order has been stored. This tracks one order per address; physical bin capacity and partial dispatch quantities are not modeled.
-
-Older orders that predate address reservations retain their existing location workflow. Their historical locations are not automatically converted into reserved addresses.
-
-## Use it on a phone
-
-The interface adapts to small screens: mobile navigation, stacked cards/forms, touch-sized controls, rear-camera scanning, and horizontally scrollable station schedules. All devices must connect to **the same server** to share data.
-
-For a local network demonstration, run:
-
-```powershell
-python app.py --demo --host 0.0.0.0
+```text
+Material cutting -> CNC machining -> Surface finishing -> Quality inspection -> Warehouse 1/4
 ```
 
-Connect the phone to the same Wi-Fi, find the computer's IPv4 address with `ipconfig`, and open `http://YOUR-COMPUTER-IP:5000`. Windows may ask you to allow the server on your private network. Manual code entry and image upload work for this local demonstration.
+If the manager chooses a lot size of 100, ForgeFlow creates five independently traceable lots. It copies the confirmed route into each lot, reserves the warehouse address, creates five QR labels, calculates machine queues, and produces an original plan and live forecast.
 
-**Live phone camera scanning needs a trusted HTTPS address.** A plain HTTP LAN address is not a secure context. Deploy the app behind HTTPS before using live camera scanning on phones. Localhost is allowed for development on the computer itself. See [MDN's camera requirements](https://developer.mozilla.org/en-US/docs/Web/API/MediaDevices/getUserMedia) and the [QR scanner documentation](https://scanapp.org/html5-qrcode-docs/docs/intro). A browser needs the user's camera permission; the camera is stopped when scanning succeeds or the dialog closes.
+The QR stays attached to the lot traveler, pallet, container, or job card. At every station, the responsible employee scans the same label, reads the instruction, starts the process, performs the physical work, and scans again to complete it.
 
-No QR image or camera frame is sent to an external QR service. QR generation runs in Python and image decoding runs locally in the browser.
+```mermaid
+flowchart LR
+    A[Manager creates order] --> B[Route snapshot and address reservation]
+    B --> C[Lots and QR labels]
+    C --> D[Machine processing]
+    D --> E[Quality inspection]
+    E -- Fail --> F[Quality hold]
+    F --> G[Manager authorizes reinspection]
+    G --> E
+    E -- Pass --> H[Warehouse receipt]
+    H --> I[Client status and approved ETA]
+    I --> J[Dispatch and address release]
+```
 
-## Scheduling and analytics assumptions
+Every accepted action records the user, lot, operation, time, and relevant decision details.
 
-- Stations have **continuous 24/7 availability**, one active lot per station, and no shifts, weekends or holiday calendar yet.
-- Due dates are interpreted in India Standard Time (UTC+05:30) by default. Set `FACTORY_UTC_OFFSET_MINUTES` for another fixed factory offset. Timestamps are stored in UTC and displayed in the viewer's local time. Daylight-saving shift calendars are not implemented.
-- Route estimates are **minutes per lot**, not per unit. A smaller final lot uses the same estimate. Create a suitable route version for different production quantities.
-- Scheduling is a deterministic serial heuristic using explicit overrides, order priority, creation order, route precedence, machine capacity and transition allowances. It is not a mathematically optimal shop-floor optimizer. It may reserve a station for an earlier-priority lot arriving later.
-- A priority override promotes the selected operation and its waiting predecessor steps. It does not preempt active work. Previous/new positions, actor, reason and time are audited.
-- Operators cannot start an operation before its predecessors finish, bypass the selected station's queue, or start on an occupied or unavailable station. Transition estimates guide forecasts; they are not enforced as mandatory minimum travel times.
-- Original planned timestamps stay fixed. Current forecasts recalculate as time and production change. An overdue running operation is forecast to finish at least one minute from now until the operator completes it; no unearned predictive accuracy is claimed.
-- Held routes and unavailable stations have no forecast finish until resolved. Other independent routes can still run.
-- Historical benchmarks require five prior completed observations for the same part, **route version**, machine, route position and lot quantity. A completed operation excludes itself from its benchmark. This avoids grading a process from insufficient or incompatible data.
-- Process deviation and schedule delay are separate. Historical deviation is green below −5%, orange from −5% through +5%, and red above +5%. A running operation's elapsed duration is provisional.
-- Waiting/transition time is the elapsed time from the previous completion (or order creation for the first step) to actual start. It cannot distinguish physical travel from idle queue time without additional arrival scans.
-- Utilization is actual busy minutes in the trailing 24 hours divided by 1,440 available minutes; prior failed QC attempts remain included. It is not shift-based OEE.
-- Views refresh every 20 seconds while idle. Forms and scanner dialogs are not replaced by background refreshes. Start/complete decisions are always revalidated by the server.
-- Clients see the last **manager-approved ETA**, even if an internal forecast changes. Their production progress updates independently.
+## Roles and permissions
 
-## Data and accounts
+| Role | Responsibilities | Boundaries |
+| --- | --- | --- |
+| **Manager** | Configure stations, approve staff, create clients, products, routes and orders, print labels, manage queues and availability, authorize reinspection, approve ETAs, and review analytics | Full operational workspace; managers are created only during initial setup |
+| **Machine operator** | View one assigned machine queue, scan lots, read instructions, and record starts/completions | Cannot skip steps, bypass queues, use another station, or perform QC/storage work |
+| **Quality checker** | Inspect lots at one assigned QC station and record pass/fail with notes | Failed lots remain held until a manager authorizes reinspection |
+| **Warehouse manager** | Receive QC-approved lots into reserved addresses and dispatch complete orders | Acts only on the assigned warehouse |
+| **Client** | View owned orders, progress, stage, status, due date, and approved ETA | Cannot see internal queues, staff data, other clients, or unapproved forecasts |
 
-The database is `instance/manufacturing.db`. The persistent session signing key is `instance/session-key`. Neither is included in source control. SQLite transactions serialize production changes; a database constraint additionally prevents two active lots on one station.
+Staff register from the sign-in page as a machine operator, quality checker, or warehouse manager. They cannot sign in until a manager approves the request and assigns a matching station.
 
-For a clean installation without demo accounts, use a separate copy of the project **without an `instance` folder**, install dependencies, and run:
+## Features
+
+### Factory and route configuration
+
+- Any number of production machines, QC stations, and warehouses.
+- Visual factory floor and route builder.
+- Station codes, names, type, availability, queue, workload, and utilization.
+- Validated routes containing production steps followed by QC and storage.
+- Planned minutes per lot, transition allowances, and work instructions per step.
+- Versioned routes: revisions create a new version instead of rewriting history.
+- Existing orders retain the route snapshot used at creation.
+
+### Orders, lots, and QR traceability
+
+- Client, product, route, quantity, lot size, priority, due date, and storage address.
+- Automatic split into up to 100 lots, including a smaller final lot.
+- Unique order codes, lot codes, and cryptographically random QR tokens.
+- Printable lot-traveler labels with part, quantity, route version, and sequence.
+- Camera scanning, QR-image upload, and manual lot-code entry.
+- Local browser decoding; images are not sent to an external QR service.
+- A QR identifies a lot but never authenticates a user or completes work automatically.
+
+### Scheduling and production control
+
+- Shared-machine queues across simultaneous orders.
+- Route precedence and one running lot per station.
+- Forecasts using processing time, transitions, queues, priority, and actual events.
+- Immutable original plan alongside the recalculated forecast.
+- Manager priority overrides with mandatory reason and audit history.
+- Running work is never preempted.
+- Unavailable stations and QC holds block affected downstream forecasts.
+- Server-side prevention of skipped steps, duplicate starts, double completion, wrong-station work, and unauthorized job types.
+
+### Quality, warehouse, and clients
+
+- QC pass/fail recording; failed checks require notes.
+- Quality hold and manager-authorized reinspection with preserved failed attempts.
+- Warehouse grids beginning with addresses `1/1` through `3/10`.
+- Additional warehouse rows and bays.
+- Available, reserved, and occupied address states.
+- Transactional protection against duplicate address reservations.
+- Receipt into the order's reserved address.
+- Dispatch reference and address release after every order lot is stored.
+- Client accounts with generated temporary passwords delivered through STARTTLS SMTP.
+- Client-specific data filtering and manager-approved ETA publication.
+
+### Visibility and analytics
+
+- Manager overview of active, running, held/delayed, and completed orders.
+- Machine pulse, queues, next work, planned workload, and trailing 24-hour utilization.
+- Lot timeline and activity log for production and management decisions.
+- Planned-versus-actual timestamps, start delay, completion delay, and waiting/transfer time.
+- Historical duration benchmark after five comparable completed observations.
+- Quantity-weighted order progress and dynamically recalculated internal ETA.
+
+## Quick start
+
+### Requirements
+
+- Python 3.11 or newer.
+- A current Edge, Chrome, Firefox, or Safari browser.
+- Node.js only for browser tests.
+- SMTP access only for creating real client accounts.
+
+### Windows
+
+1. Clone or download the repository.
+2. Run `Setup.bat` once.
+3. Run `Start Demo.bat`.
+4. Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
+5. Keep the terminal window open while using the app.
+
+### Manual installation
+
+```bash
+git clone https://github.com/vrushanksuryawanshi/advanced-manufacturing-management-system.git
+cd advanced-manufacturing-management-system
+python -m venv .venv
+```
 
 ```powershell
+# Windows PowerShell
+.\.venv\Scripts\Activate.ps1
+```
+
+```bash
+# macOS or Linux
+source .venv/bin/activate
+```
+
+Then, on either platform:
+
+```bash
+python -m pip install -r requirements.txt
+python app.py --demo
+```
+
+### Demo accounts
+
+All demo accounts use `FactoryDemo123!`.
+
+| Workspace | Email |
+| --- | --- |
+| Manager | `manager@demo.local` |
+| Machine operator | `operator@demo.local` |
+| Client | `client@demo.local` |
+| Second client for isolation testing | `other-client@demo.local` |
+
+`--demo` seeds data only when no users exist. Restarts preserve `instance/manufacturing.db`; demo orders begin waiting and no production measurements are fabricated.
+
+### Clean real installation
+
+Use a copy with no `instance` directory, install dependencies, then run:
+
+```bash
 python app.py --init-manager
 ```
 
-Create your real manager interactively. Operators can register at the sign-in page, but cannot sign in until a manager approves them and assigns one machine. Managers create client accounts; the app emails their login address and generated temporary password. Configure outbound SMTP before creating clients by setting `SMTP_HOST`, `SMTP_PORT` (usually `587`), `SMTP_USER`, `SMTP_PASSWORD`, and `SMTP_FROM` in the server environment. The mail server must support STARTTLS. If email delivery fails, account creation is rolled back. Managers are not created from the public registration page. Do not expose the demo database publicly. For HTTPS hosting set `COOKIE_SECURE=1`, keep the signing key stable and private, and run behind a configured HTTPS reverse proxy. No public deployment has been performed.
+Enter the first manager's name, email, and password. Then add stations, configure SMTP, create clients, approve staff, build routes, and create orders. Do not use demo accounts or `--demo` for a live installation.
 
-Before changing or moving data, stop the server and back up the entire `instance` folder. The current version does not include password recovery, account deactivation, or an administration UI for changing existing operator assignments.
+## Using the application
 
-## Validation
+### Manager
 
-Backend workflow tests use isolated databases under `tmp/tests`:
+1. Add production, QC, and storage stations under **Machines**.
+2. Configure outbound email and create clients in **Team & access**.
+3. Review staff registration requests and assign one matching station.
+4. Add a product under **Products & routes**.
+5. Build its route in processing order, ending with QC and a warehouse address.
+6. Enter duration, transition, and instruction data for each step.
+7. Create an order, choose quantity and lot size, and confirm the storage reservation.
+8. Print the generated QR labels and attach the correct label to every lot.
+9. Monitor **Overview**, **Machine schedule**, **Warehouse**, and **Activity log**.
+10. Record reasons for priority changes, machine downtime, and QC reinspection.
+11. Review and approve the ETA that clients should see.
 
-```powershell
-python -m unittest discover -s tests -p "test_*.py" -v
+### Machine operator
+
+Open **My work queue**, scan the physical lot, verify the displayed machine and instruction, and choose **Start operation**. After performing the work, scan again and choose **Complete operation**, then move the lot and label to the next station.
+
+### Quality checker
+
+Scan and start the QC step. On completion, record pass or fail. A failure requires notes and stops the route. After corrective action, the manager must authorize reinspection before the checker can inspect again.
+
+### Warehouse manager
+
+Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. After every lot in the order is stored, enter the dispatch reference to release the address.
+
+### Client
+
+Sign in using the emailed credentials. The portal shows only that client's order identity, product, quantity, progress, stage, required date, status, and manager-approved ETA.
+
+## Scheduling and analytics
+
+Version 1 uses an explainable serial scheduling heuristic:
+
+```text
+earliest start = max(previous step completion + transition allowance,
+                     station availability)
+forecast end   = earliest start + planned minutes per lot
 ```
 
-Browser tests use an isolated server on port 5001 and installed Microsoft Edge:
+Eligible work is sorted by manager override, order priority, creation time, then stable order/lot/step identifiers. Completed work uses actual timestamps; running work uses actual start plus planned duration; pending work uses the current queues. Held or unavailable routes lose their downstream ETA until resolved.
 
-```powershell
+Scheduling assumes continuous 24/7 station availability. Estimates are per lot, including a smaller final lot. Shift calendars, breaks, maintenance calendars, setup matrices, alternative machines, material constraints, and optimization solvers are not modeled.
+
+Machine utilization is recorded busy minutes during the previous 24 hours divided by 1,440. It is not shift-adjusted OEE.
+
+Historical benchmarks require five prior completions matching product, route version, station, route position, and lot quantity. Green means more than 5% faster than the mean, orange means within ±5%, and red means more than 5% slower. Process performance is kept separate from schedule delay.
+
+## Architecture and data
+
+```mermaid
+flowchart TB
+    UI[Responsive browser UI] -->|Session + JSON API| App[Flask application]
+    App --> Auth[Roles and workflow validation]
+    App --> Schedule[Queue and ETA scheduler]
+    App --> QR[SVG QR generator]
+    App --> SMTP[Client credential email]
+    App --> DB[(SQLite WAL database)]
+    UI --> Scan[Local camera/image decoder]
+    Server[Waitress WSGI server] --> App
+```
+
+The frontend has no build step. Flask serves static files and the session-based JSON API. SQLite uses foreign keys, immediate write transactions, and unique indexes to protect station activity and warehouse reservations.
+
+| Entity | Responsibility |
+| --- | --- |
+| `users`, `assignments` | Accounts, approval, worker type, and one station assignment |
+| `machines` | Production, QC, and storage stations |
+| `parts`, `routes`, `route_steps` | Product master data and versioned processes |
+| `orders`, `lots`, `operations` | Demand, traceable batches, route snapshots, plan, and actual work |
+| `quality` | Inspection attempts, result, notes, checker, and time |
+| `warehouse_slots`, `warehouse_reservations` | Address inventory and exclusive order reservations |
+| `events` | Auditable operational and management decisions |
+
+Operational data is stored in `instance/manufacturing.db`; the session signing key is `instance/session-key`. Both are excluded from Git.
+
+### API surface
+
+The included frontend uses a session-based JSON API. It is an internal application interface, not yet a stable third-party integration contract.
+
+| Area | Endpoints |
+| --- | --- |
+| Session and onboarding | `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/registration-machines`, `POST /api/operator-register` |
+| Role-filtered workspace | `GET /api/state` |
+| Accounts | `POST /api/users`, `POST /api/operators/:id/approve` |
+| Factory | `POST /api/machines`, `POST /api/machines/:id/availability`, `POST /api/warehouses/:id/rows` |
+| Products and routes | `POST /api/parts`, `POST /api/routes` |
+| Orders | `POST /api/orders`, `POST /api/orders/:id/approve-eta` |
+| QR and lots | `GET /api/lots/:id/qr`, `GET /api/scan?code=...` |
+| Production | `POST /api/operations/:id/action`, `POST /api/operations/:id/prioritize`, `POST /api/operations/:id/release` |
+| Warehouse | `POST /api/warehouse-slots/:id/dispatch` |
+
+All mutations require an authenticated, authorized session where applicable, a valid CSRF token, and a JSON object. The server repeats workflow validation even when the interface has already hidden an unavailable action.
+
+## Configuration
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SECRET_KEY` | Generated persistent file | Session signing; set a strong managed value in deployment |
+| `COOKIE_SECURE` | `0` | Set to `1` after HTTPS is enabled |
+| `FACTORY_UTC_OFFSET_MINUTES` | `330` | Fixed factory UTC offset; 330 is UTC+05:30 |
+| `SMTP_HOST` | None | Outbound mail server required for client creation |
+| `SMTP_PORT` | `587` | STARTTLS port |
+| `SMTP_USER` | None | Mail login |
+| `SMTP_PASSWORD` | None | Mail password |
+| `SMTP_FROM` | `SMTP_USER` | Credential-email sender |
+
+CLI options are `--demo`, `--init-manager`, `--host`, and `--port`. Do not commit real environment values.
+
+Live phone camera scanning requires trusted HTTPS. `localhost` works for development; a plain LAN HTTP address usually supports manual entry and image upload but browsers block direct camera access.
+
+## Security
+
+- Salted password hashing through Werkzeug.
+- 12-hour `HttpOnly`, `SameSite=Lax` sessions and optional secure cookies.
+- CSRF protection on every state-changing API request.
+- Login attempt throttling per application process.
+- Server-side role, worker type, station, ownership, queue, route, and state validation.
+- Client responses contain only client-safe owned-order data.
+- One-running-operation-per-station database constraint.
+- Serialized writes and foreign-key relationships.
+- Content Security Policy, frame denial, MIME protection, same-origin referrers, and no-store API responses.
+- Random QR identifiers that do not act as credentials.
+
+Internet deployment also needs HTTPS termination, protected secrets, operating-system hardening, centralized logging, monitoring, encrypted backups, and password recovery/account administration.
+
+## Testing
+
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
 npm install
 npm run test:ui
 ```
 
-Tests cover permissions, client isolation, CSRF, concurrent starts, route precedence, queue overrides, unique QR labels, route snapshots, QC failure/reinspection, storage, schedule capacity, historical thresholds and responsive browser workflows. Browser tests also decode a generated QR image. Screenshots are written to `tmp/screenshots`. Real phone cameras, printers, and a deployed HTTPS environment still need device acceptance testing.
+The backend tests cover permissions, CSRF, client isolation, registration/approval, route versions, rollbacks, QR generation, concurrent starts, scheduling, overrides, QC, warehouse conflicts/dispatch, benchmarks, and database startup. Playwright validates manager, operator, and client flows at desktop and mobile sizes and decodes a real generated QR image.
 
-## Remaining extensions
+Real phones, cameras, label printers, SMTP delivery, and the deployed HTTPS network require acceptance testing on the equipment used by the factory.
 
-See [the requirements review](docs/requirements-review.md) for how the PDF maps to this version. Future work includes shift calendars, a proportional time-axis Gantt editor, machine-specific drag-and-drop queue editing, richer historical reports/export, planned downtime and setup models, notification delivery, account recovery, production deployment/backup automation, and ML prediction after sufficient real data exists.
+## Deployment and backup
+
+For a controlled pilot:
+
+1. Use a dedicated host and clean non-demo database.
+2. Set a managed `SECRET_KEY` and correct factory offset.
+3. Put Waitress behind a trusted HTTPS reverse proxy.
+4. Set `COOKIE_SECURE=1` and configure SMTP.
+5. Restrict network access, supervise the process, and collect logs.
+6. Test every role, phone/browser, camera, and printer.
+7. Define who may approve staff, priorities, reinspection, and client ETAs.
+8. Automate encrypted backups and test restoration.
+
+For an offline backup, stop the server and copy the complete `instance` directory. Record the application release with the backup. Restore only while the server is stopped, preserve the current data separately, and verify users, routes, active orders, reservations, and recent events before resuming production. Git is not a database backup.
+
+SQLite is suitable for this single-instance Version 1 design. Before horizontal scaling or high write volume, migrate to a server database and shared rate limiter.
+
+## Current boundaries
+
+Version 1 does not include:
+
+- PLC/CNC/sensor, ERP, accounting, purchasing, or shipping integration.
+- Automatic cycle capture or machine safety controls.
+- Shift/holiday calendars, setup matrices, labor/material capacity, or alternative machines.
+- Mathematical job-shop optimization or machine-learning prediction.
+- Pause/resume, scrap quantity, post-creation lot split/merge, or partial dispatch.
+- Physical bin capacity, mixed-order storage, inventory valuation, or stock rotation.
+- Password reset, account deactivation, station reassignment, or MFA interfaces.
+- A public versioned integration API, cloud deployment, or backup automation.
+
+## Troubleshooting
+
+- **Port 5000 is busy:** run `python app.py --demo --port 5050`.
+- **Phone camera unavailable:** use trusted HTTPS, image upload, or manual lot entry.
+- **Client creation fails:** verify all SMTP settings and STARTTLS support; failed email delivery rolls back the account.
+- **Staff cannot sign in:** a manager must approve the registration and matching station.
+- **Operator cannot start:** check predecessor completion, queue position, station availability/activity, assignment, role, and quality hold.
+- **Order has no ETA:** resolve its hold, unavailable station, or blocked predecessor.
+- **Address cannot be selected:** refresh and choose an available address in the route's warehouse.
+
+## Project structure
+
+```text
+├── app.py                     # API, database, scheduling, workflows, and server
+├── static/
+│   ├── index.html             # Browser entry point
+│   ├── app.js                 # Role-based workspace and scanning
+│   ├── factory.js             # Factory floor, routes, staff, and warehouse UI
+│   ├── styles.css             # Responsive design system
+│   ├── factory.css            # Factory/warehouse visualization
+│   └── vendor/                # Bundled QR scanner and license
+├── tests/                     # Backend and Playwright browser tests
+├── docs/factory-design.md     # Interface design direction
+├── requirements.txt           # Python dependencies
+├── package.json               # Browser-test dependencies
+├── Setup.bat                  # Windows setup
+└── Start Demo.bat             # Windows demo launcher
+```
+
+No open-source license has been selected. Until one is added, normal copyright rules apply even though the repository is public.
