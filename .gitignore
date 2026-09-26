@@ -1,0 +1,8 @@
+.venv/
+.python-packages/
+__pycache__/
+instance/
+node_modules/
+test-results/
+tmp/
+*.pyc
