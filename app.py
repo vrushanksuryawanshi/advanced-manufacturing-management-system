@@ -18,6 +18,13 @@ import sqlite3
 import sys
 import time
 
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # PostgreSQL is optional for local SQLite development.
+    psycopg = None
+    dict_row = None
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / '.python-packages'))
 from flask import Flask, g, jsonify, request, session, send_file
@@ -58,6 +65,104 @@ CREATE TABLE IF NOT EXISTS warehouse_reservations(slot_id INTEGER PRIMARY KEY RE
 CREATE TABLE IF NOT EXISTS app_migrations(name TEXT PRIMARY KEY);
 """
 
+POSTGRES_SCHEMA = """
+CREATE TABLE IF NOT EXISTS machines(id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
+ kind TEXT NOT NULL CHECK(kind IN ('production','qc','storage')), available INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
+ password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','operator','client')), status TEXT NOT NULL DEFAULT 'approved' CHECK(status IN ('pending','approved')), requested_machine_id INTEGER REFERENCES machines(id), worker_type TEXT NOT NULL DEFAULT 'production');
+CREATE TABLE IF NOT EXISTS assignments(user_id INTEGER REFERENCES users(id), machine_id INTEGER REFERENCES machines(id), PRIMARY KEY(user_id,machine_id));
+CREATE TABLE IF NOT EXISTS parts(id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS warehouse_slots(id SERIAL PRIMARY KEY, machine_id INTEGER NOT NULL REFERENCES machines(id),
+ row_number INTEGER NOT NULL, bay_number INTEGER NOT NULL, UNIQUE(machine_id,row_number,bay_number));
+CREATE TABLE IF NOT EXISTS routes(id SERIAL PRIMARY KEY, part_id INTEGER NOT NULL REFERENCES parts(id), version INTEGER NOT NULL,
+ created_at TEXT NOT NULL, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id), UNIQUE(part_id,version));
+CREATE TABLE IF NOT EXISTS route_steps(id SERIAL PRIMARY KEY, route_id INTEGER NOT NULL REFERENCES routes(id), seq INTEGER NOT NULL,
+ machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS orders(id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, client_id INTEGER NOT NULL REFERENCES users(id),
+ part_id INTEGER NOT NULL REFERENCES parts(id), route_id INTEGER NOT NULL REFERENCES routes(id), quantity INTEGER NOT NULL,
+ priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id));
+CREATE TABLE IF NOT EXISTS lots(id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), code TEXT UNIQUE NOT NULL,
+ token TEXT UNIQUE NOT NULL, quantity INTEGER NOT NULL, location TEXT);
+CREATE TABLE IF NOT EXISTS operations(id SERIAL PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES lots(id), seq INTEGER NOT NULL,
+ machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,
+ status TEXT NOT NULL DEFAULT 'pending', rank REAL NOT NULL DEFAULT 0, planned_start TEXT, planned_end TEXT,
+ actual_start TEXT, actual_end TEXT, operator_id INTEGER REFERENCES users(id), UNIQUE(lot_id,seq));
+CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_machine ON operations(machine_id) WHERE status='running';
+CREATE TABLE IF NOT EXISTS quality(id SERIAL PRIMARY KEY, operation_id INTEGER REFERENCES operations(id), result TEXT NOT NULL,
+ notes TEXT NOT NULL, user_id INTEGER REFERENCES users(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS events(id SERIAL PRIMARY KEY, lot_id INTEGER REFERENCES lots(id), user_id INTEGER REFERENCES users(id),
+ kind TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS warehouse_reservations(slot_id INTEGER PRIMARY KEY REFERENCES warehouse_slots(id),
+ order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS app_migrations(name TEXT PRIMARY KEY);
+CREATE UNIQUE INDEX IF NOT EXISTS one_station_per_operator ON assignments(user_id);
+"""
+
+ID_TABLES = {'users','machines','parts','routes','route_steps','orders','lots','operations','quality','events','warehouse_slots'}
+
+class PostgresCursor:
+    def __init__(self, cursor, lastrowid=None):
+        self.cursor, self.lastrowid = cursor, lastrowid
+
+    def fetchone(self):
+        return self.cursor.fetchone()
+
+    def fetchall(self):
+        return self.cursor.fetchall()
+
+    def __iter__(self):
+        return iter(self.cursor)
+
+class PostgresConnection:
+    """Small compatibility layer that keeps the application's parameterized SQL portable."""
+    def __init__(self, url):
+        if psycopg is None:
+            raise RuntimeError('PostgreSQL support is not installed. Run: pip install -r requirements.txt')
+        self.connection = psycopg.connect(url, autocommit=True, row_factory=dict_row)
+
+    def execute(self, sql, args=()):
+        statement = sql.strip()
+        if statement.upper() == 'BEGIN IMMEDIATE':
+            statement = 'BEGIN'
+        statement = statement.replace('?', '%s')
+        table = None
+        if statement.upper().startswith('INSERT INTO '):
+            table = statement.split()[2].split('(')[0].lower()
+        wants_id = table in ID_TABLES and 'RETURNING ' not in statement.upper()
+        if wants_id:
+            statement += ' RETURNING id'
+        cursor = self.connection.execute(statement, args)
+        returned = cursor.fetchone() if wants_id else None
+        lastrowid = returned['id'] if returned else None
+        return PostgresCursor(cursor, lastrowid)
+
+    def executemany(self, sql, args):
+        return self.connection.executemany(sql.replace('?', '%s'), args)
+
+    def commit(self):
+        self.connection.commit()
+
+    def rollback(self):
+        self.connection.rollback()
+
+    def close(self):
+        self.connection.close()
+
+    def __enter__(self):
+        self.connection.execute('BEGIN')
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.rollback() if exc_type else self.commit()
+
+def connect_database(database):
+    if str(database).startswith(('postgres://', 'postgresql://')):
+        return PostgresConnection(str(database))
+    connection = sqlite3.connect(database, timeout=15)
+    connection.row_factory = sqlite3.Row
+    connection.execute('PRAGMA foreign_keys=ON')
+    return connection
+
 def utcnow():
     return datetime.now(timezone.utc)
 
@@ -91,12 +196,20 @@ def number(data, key, low=0, high=1000000, integer=False):
 def create_app(database=None, testing=False):
     app = Flask(__name__, static_folder='static', static_url_path='/static')
     instance = ROOT / 'instance'
-    instance.mkdir(exist_ok=True)
+    database = database or os.environ.get('DATABASE_URL') or instance / 'manufacturing.db'
+    if os.environ.get('VERCEL') and not os.environ.get('DATABASE_URL'):
+        raise RuntimeError('DATABASE_URL is required on Vercel. Connect a PostgreSQL database and redeploy.')
+    if not str(database).startswith(('postgres://', 'postgresql://')):
+        instance.mkdir(exist_ok=True)
     secret_path = instance / 'session-key'
-    if not secret_path.exists():
-        secret_path.write_text(secrets.token_hex(32), encoding='utf8')
-    app.config.update(SECRET_KEY=os.environ.get('SECRET_KEY') or secret_path.read_text(),
-                      DATABASE=str(database or instance / 'manufacturing.db'), TESTING=testing,
+    configured_secret = os.environ.get('SECRET_KEY')
+    if not configured_secret:
+        if str(database).startswith(('postgres://', 'postgresql://')):
+            raise RuntimeError('SECRET_KEY must be set when using PostgreSQL.')
+        if not secret_path.exists():
+            secret_path.write_text(secrets.token_hex(32), encoding='utf8')
+        configured_secret = secret_path.read_text()
+    app.config.update(SECRET_KEY=configured_secret, DATABASE=str(database), TESTING=testing,
                       SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE='Lax',
                       SESSION_COOKIE_SECURE=os.environ.get('COOKIE_SECURE') == '1',
                       FACTORY_UTC_OFFSET_MINUTES=int(os.environ.get('FACTORY_UTC_OFFSET_MINUTES', '330')),
@@ -104,38 +217,47 @@ def create_app(database=None, testing=False):
                       SMTP_USER=os.environ.get('SMTP_USER'), SMTP_PASSWORD=os.environ.get('SMTP_PASSWORD'),
                       SMTP_FROM=os.environ.get('SMTP_FROM') or os.environ.get('SMTP_USER'),
                       MAX_CONTENT_LENGTH=1024 * 1024, PERMANENT_SESSION_LIFETIME=timedelta(hours=12))
-    with closing(sqlite3.connect(app.config['DATABASE'])) as conn, conn:
-        conn.executescript(SCHEMA)
-        user_columns = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
-        if 'status' not in user_columns:
-            conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
-        if 'requested_machine_id' not in user_columns:
-            conn.execute('ALTER TABLE users ADD COLUMN requested_machine_id INTEGER REFERENCES machines(id)')
-        if 'worker_type' not in user_columns:
-            conn.execute("ALTER TABLE users ADD COLUMN worker_type TEXT NOT NULL DEFAULT 'production'")
-            conn.execute("UPDATE users SET worker_type=COALESCE((SELECT m.kind FROM assignments a JOIN machines m ON m.id=a.machine_id WHERE a.user_id=users.id LIMIT 1),(SELECT kind FROM machines WHERE id=users.requested_machine_id),'production') WHERE role='operator'")
-        for table in ('routes','orders'):
-            if 'warehouse_slot_id' not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
-                conn.execute(f'ALTER TABLE {table} ADD COLUMN warehouse_slot_id INTEGER REFERENCES warehouse_slots(id)')
-        # Extend the original demo floor once; real installations manage their own inventory.
-        if not conn.execute("SELECT 1 FROM app_migrations WHERE name='expanded_demo_floor'").fetchone():
-            if conn.execute("SELECT 1 FROM users WHERE email='manager@demo.local'").fetchone():
-                for n in range(1,13):
-                    conn.execute("INSERT OR IGNORE INTO machines(code,name,kind) VALUES(?,?,'production')",(f'M{n}',f'Production machine {n}'))
-                conn.execute("INSERT INTO app_migrations VALUES('expanded_demo_floor')")
-        for (warehouse_id,) in conn.execute("SELECT id FROM machines WHERE kind='storage'").fetchall():
-            if not conn.execute('SELECT 1 FROM warehouse_slots WHERE machine_id=?',(warehouse_id,)).fetchone():
-                conn.executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(?,?,?)',[(warehouse_id,r,b) for r in range(1,4) for b in range(1,11)])
-        conn.execute('DELETE FROM assignments WHERE rowid NOT IN (SELECT MIN(rowid) FROM assignments GROUP BY user_id)')
-        conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS one_station_per_operator ON assignments(user_id)')
-        conn.commit()
-        conn.execute('PRAGMA journal_mode=WAL')
+    is_postgres = app.config['DATABASE'].startswith(('postgres://', 'postgresql://'))
+    with closing(connect_database(app.config['DATABASE'])) as conn, conn:
+        if is_postgres:
+            conn.execute(POSTGRES_SCHEMA)
+        else:
+            conn.executescript(SCHEMA)
+        if is_postgres:
+            if os.environ.get('INITIAL_MANAGER_EMAIL') and not conn.execute('SELECT 1 FROM users LIMIT 1').fetchone():
+                initial_password = os.environ.get('INITIAL_MANAGER_PASSWORD', '')
+                require(len(initial_password) >= 12, 'INITIAL_MANAGER_PASSWORD must contain at least 12 characters.')
+                conn.execute('INSERT INTO users(name,email,password,role) VALUES(?,?,?,\'manager\') ON CONFLICT (email) DO NOTHING',
+                             (os.environ.get('INITIAL_MANAGER_NAME', 'System Manager'), os.environ['INITIAL_MANAGER_EMAIL'].strip().lower(), generate_password_hash(initial_password)))
+        else:
+            user_columns = {r[1] for r in conn.execute('PRAGMA table_info(users)')}
+            if 'status' not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
+            if 'requested_machine_id' not in user_columns:
+                conn.execute('ALTER TABLE users ADD COLUMN requested_machine_id INTEGER REFERENCES machines(id)')
+            if 'worker_type' not in user_columns:
+                conn.execute("ALTER TABLE users ADD COLUMN worker_type TEXT NOT NULL DEFAULT 'production'")
+                conn.execute("UPDATE users SET worker_type=COALESCE((SELECT m.kind FROM assignments a JOIN machines m ON m.id=a.machine_id WHERE a.user_id=users.id LIMIT 1),(SELECT kind FROM machines WHERE id=users.requested_machine_id),'production') WHERE role='operator'")
+            for table in ('routes','orders'):
+                if 'warehouse_slot_id' not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN warehouse_slot_id INTEGER REFERENCES warehouse_slots(id)')
+            # Extend the original demo floor once; real installations manage their own inventory.
+            if not conn.execute("SELECT 1 FROM app_migrations WHERE name='expanded_demo_floor'").fetchone():
+                if conn.execute("SELECT 1 FROM users WHERE email='manager@demo.local'").fetchone():
+                    for n in range(1,13):
+                        conn.execute("INSERT OR IGNORE INTO machines(code,name,kind) VALUES(?,?,'production')",(f'M{n}',f'Production machine {n}'))
+                    conn.execute("INSERT INTO app_migrations VALUES('expanded_demo_floor')")
+            for (warehouse_id,) in conn.execute("SELECT id FROM machines WHERE kind='storage'").fetchall():
+                if not conn.execute('SELECT 1 FROM warehouse_slots WHERE machine_id=?',(warehouse_id,)).fetchone():
+                    conn.executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(?,?,?)',[(warehouse_id,r,b) for r in range(1,4) for b in range(1,11)])
+            conn.execute('DELETE FROM assignments WHERE rowid NOT IN (SELECT MIN(rowid) FROM assignments GROUP BY user_id)')
+            conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS one_station_per_operator ON assignments(user_id)')
+            conn.commit()
+            conn.execute('PRAGMA journal_mode=WAL')
 
     def db():
         if 'db' not in g:
-            g.db = sqlite3.connect(app.config['DATABASE'], timeout=15)
-            g.db.row_factory = sqlite3.Row
-            g.db.execute('PRAGMA foreign_keys=ON')
+            g.db = connect_database(app.config['DATABASE'])
         return g.db
 
     def rows(sql, args=()):
@@ -215,6 +337,9 @@ def create_app(database=None, testing=False):
     @app.errorhandler(sqlite3.IntegrityError)
     def conflict(error):
         return jsonify(error='That code or email already exists, or the machine is already running. Refresh and try again.'), 409
+
+    if psycopg:
+        app.register_error_handler(psycopg.IntegrityError, conflict)
 
     @app.get('/')
     def index():
@@ -443,7 +568,8 @@ def create_app(database=None, testing=False):
     def add_warehouse_row(warehouse_id):
         require(one('SELECT kind FROM machines WHERE id=?',(warehouse_id,))['kind']=='storage','Select a warehouse.')
         count=number(request.json,'bays',1,50,True)
-        row=db().execute('SELECT COALESCE(MAX(row_number),0)+1 FROM warehouse_slots WHERE machine_id=?',(warehouse_id,)).fetchone()[0]
+        result=db().execute('SELECT COALESCE(MAX(row_number),0)+1 AS next_row FROM warehouse_slots WHERE machine_id=?',(warehouse_id,)).fetchone()
+        row=result['next_row'] if is_postgres else result[0]
         db().executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(?,?,?)',[(warehouse_id,row,b) for b in range(1,count+1)])
         event(None,'Warehouse row added',dict(warehouse_id=warehouse_id,row=row,bays=count))
         return jsonify(ok=True),201
@@ -517,7 +643,8 @@ def create_app(database=None, testing=False):
             checked.append((machine,number(step,'minutes',0.1,10080),number(step,'transition_minutes',0,1440),str(step.get('instructions','')).strip()[:2000]))
         require(checked[-1][0]['kind']=='storage' and checked[-2][0]['kind']=='qc' and all(s[0]['kind']=='production' for s in checked[:-2]), 'Route must end with QC then storage, with production steps before them.')
         slot=available_slot(data.get('warehouse_slot_id'),checked[-1][0]['id'])
-        version=db().execute('SELECT COALESCE(MAX(version),0)+1 FROM routes WHERE part_id=?',(part['id'],)).fetchone()[0]
+        version_result=db().execute('SELECT COALESCE(MAX(version),0)+1 AS next_version FROM routes WHERE part_id=?',(part['id'],)).fetchone()
+        version=version_result['next_version'] if is_postgres else version_result[0]
         cur=db().execute('INSERT INTO routes(part_id,version,created_at,warehouse_slot_id) VALUES(?,?,?,?)',(part['id'],version,stamp(),slot['id']))
         for seq,(machine,minutes,transition,instructions) in enumerate(checked,1):
             db().execute('INSERT INTO route_steps(route_id,seq,machine_id,minutes,transition_minutes,instructions) VALUES(?,?,?,?,?,?)',(cur.lastrowid,seq,machine['id'],minutes,transition if seq>1 else 0,instructions))
@@ -678,17 +805,19 @@ def create_app(database=None, testing=False):
 
 def seed_demo(app):
     """Explicit demo setup only; never seeded when serving a real database by default."""
-    with closing(sqlite3.connect(app.config['DATABASE'])) as db, db:
-        if db.execute('SELECT COUNT(*) FROM users').fetchone()[0]:
+    postgres = app.config['DATABASE'].startswith(('postgres://', 'postgresql://'))
+    with closing(connect_database(app.config['DATABASE'])) as db, db:
+        count=db.execute('SELECT COUNT(*) AS total FROM users').fetchone()
+        if count['total'] if postgres else count[0]:
             return
         for name,email,role in [('Alex Morgan','manager@demo.local','manager'),('Sam Rivera','operator@demo.local','operator'),('Jordan Lee','client@demo.local','client'),('Taylor Brooks','other-client@demo.local','client')]:
             db.execute('INSERT INTO users(name,email,password,role) VALUES(?,?,?,?)',(name,email,generate_password_hash('FactoryDemo123!'),role))
         for code,name,kind in [('M1','Material cutting','production'),('M4','CNC machining','production'),('M7','Surface finishing','production'),('QC','Quality inspection','qc'),('WH','Warehouse','storage')]:
             db.execute('INSERT INTO machines(code,name,kind) VALUES(?,?,?)',(code,name,kind))
         for n in range(1,13):
-            db.execute("INSERT OR IGNORE INTO machines(code,name,kind) VALUES(?,?,'production')",(f'M{n}',f'Production machine {n}'))
+            db.execute("INSERT INTO machines(code,name,kind) VALUES(?,?,'production') ON CONFLICT (code) DO NOTHING" if postgres else "INSERT OR IGNORE INTO machines(code,name,kind) VALUES(?,?,'production')",(f'M{n}',f'Production machine {n}'))
         db.executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(5,?,?)',[(r,b) for r in range(1,4) for b in range(1,11)])
-        db.execute("INSERT OR IGNORE INTO app_migrations VALUES('expanded_demo_floor')")
+        db.execute("INSERT INTO app_migrations VALUES('expanded_demo_floor') ON CONFLICT (name) DO NOTHING" if postgres else "INSERT OR IGNORE INTO app_migrations VALUES('expanded_demo_floor')")
         db.execute('INSERT INTO assignments VALUES(2,1)')
         db.executemany('INSERT INTO parts(code,name) VALUES(?,?)',[('PC-001','Precision drive gear'),('PC-002','Bearing housing'),('PC-003','Flanged coupling')])
         for part in range(1,4):
@@ -714,8 +843,10 @@ if __name__=='__main__':
         seed_demo(app)
     if args.init_manager:
         import getpass
-        with closing(sqlite3.connect(app.config['DATABASE'])) as db, db:
-            if db.execute('SELECT COUNT(*) FROM users').fetchone()[0]:
+        postgres = app.config['DATABASE'].startswith(('postgres://', 'postgresql://'))
+        with closing(connect_database(app.config['DATABASE'])) as db, db:
+            count=db.execute('SELECT COUNT(*) AS total FROM users').fetchone()
+            if count['total'] if postgres else count[0]:
                 raise SystemExit('Users already exist. Create accounts from the manager workspace.')
             name=input('Your name: ').strip()
             email=input('Your email: ').strip().lower()

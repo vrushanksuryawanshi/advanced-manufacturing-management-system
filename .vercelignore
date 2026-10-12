@@ -1,0 +1,12 @@
+.git
+.python-packages
+node_modules
+instance
+output
+test-results
+tests
+tmp
+_case_study_build
+docs
+*.bat
+playwright.config.js

@@ -304,6 +304,7 @@ All mutations require an authenticated, authorized session where applicable, a v
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SECRET_KEY` | Generated persistent file | Session signing; set a strong managed value in deployment |
+| `DATABASE_URL` | Local SQLite database | Hosted PostgreSQL connection URL required on Vercel |
 | `COOKIE_SECURE` | `0` | Set to `1` after HTTPS is enabled |
 | `FACTORY_UTC_OFFSET_MINUTES` | `330` | Fixed factory UTC offset; 330 is UTC+05:30 |
 | `SMTP_HOST` | None | Outbound mail server required for client creation |
@@ -311,6 +312,11 @@ All mutations require an authenticated, authorized session where applicable, a v
 | `SMTP_USER` | None | Mail login |
 | `SMTP_PASSWORD` | None | Mail password |
 | `SMTP_FROM` | `SMTP_USER` | Credential-email sender |
+| `INITIAL_MANAGER_NAME` | None | One-time PostgreSQL bootstrap manager name |
+| `INITIAL_MANAGER_EMAIL` | None | One-time PostgreSQL bootstrap manager email |
+| `INITIAL_MANAGER_PASSWORD` | None | One-time PostgreSQL bootstrap password (12+ characters) |
+
+For a complete GitHub-to-Vercel walkthrough, see [VERCEL_DEPLOYMENT.md](VERCEL_DEPLOYMENT.md).
 
 CLI options are `--demo`, `--init-manager`, `--host`, and `--port`. Do not commit real environment values.
 

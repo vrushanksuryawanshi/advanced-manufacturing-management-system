@@ -6,3 +6,7 @@ node_modules/
 test-results/
 tmp/
 *.pyc
+.vercel/
+.env
+.env.*
+!.env.example
