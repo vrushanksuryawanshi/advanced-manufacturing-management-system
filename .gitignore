@@ -5,6 +5,8 @@ instance/
 node_modules/
 test-results/
 tmp/
+output/
+_case_study_build/
 *.pyc
 .vercel/
 .env
