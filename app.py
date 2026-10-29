@@ -490,12 +490,13 @@ def create_app(database=None, testing=False):
                 unique.append(slot_id)
         return [available_slot(slot_id,warehouse_id) for slot_id in unique]
 
-    def forecast(ops):
+    def forecast(ops, offline_ready=None):
         """Serial schedule generation; continuous capacity, one operation per machine.
         Held/unavailable predecessors block their descendants. Active work is never preempted.
         """
         now = utcnow()
-        available = {}
+        offline_ready = offline_ready or {}
+        available = {machine_id:max(now,ready_at) for machine_id,ready_at in offline_ready.items()}
         ends, result = {}, {}
         predecessors = {}
         by_lot = {}
@@ -515,7 +516,7 @@ def create_app(database=None, testing=False):
                 ends[op['id']] = end
                 available[op['machine_id']] = end
                 result[op['id']] = (op['actual_start'], stamp(end))
-        pending = [o for o in ops if o['status'] == 'pending' and o['available'] and o['client_approved_at']]
+        pending = [o for o in ops if o['status'] == 'pending' and (o['available'] or o['machine_id'] in offline_ready) and o['client_approved_at']]
         while pending:
             eligible = [o for o in pending if predecessors[o['id']] is None or predecessors[o['id']] in ends]
             if not eligible:
@@ -1054,8 +1055,13 @@ def create_app(database=None, testing=False):
                     return sum(op['minutes'] for op in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(peer['id'],)))
                 target=min(peers,key=lambda peer:(load(peer),peer['id']))
                 db().execute('UPDATE operations SET machine_id=? WHERE id=?',(target['id'],item['id']))
-        schedule=forecast(all_operations())
         all_ops=all_operations()
+        for op in all_ops:
+            if op['id']==fault['operation_id'] and op['status']=='hold':
+                op['status']='pending'
+                op['actual_start']=None
+                op['actual_end']=None
+        schedule=forecast(all_ops,{fault['machine_id']:dt(until)})
         for lot_id in sorted(impacted_lots):
             lot_op_ids=[op['id'] for op in all_ops if op['lot_id']==lot_id]
             last_eta=max((schedule.get(op_id,(None,None))[1] for op_id in lot_op_ids if schedule.get(op_id,(None,None))[1]),default=None)
