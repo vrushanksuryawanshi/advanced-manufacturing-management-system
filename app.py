@@ -323,6 +323,14 @@ def create_app(database=None, testing=False):
         db().execute('INSERT INTO events(lot_id,user_id,kind,details,created_at) VALUES(?,?,?,?,?)',
                      (lot, g.user['id'], kind, json.dumps(details), stamp()))
 
+    def notify_maintenance_delay(machine_id, fault_id, reason, lot_ids=()):
+        machine=one('SELECT code,name FROM machines WHERE id=?',(machine_id,))
+        impacted=set(lot_ids)
+        impacted.update(r['lot_id'] for r in rows("SELECT DISTINCT lot_id FROM operations WHERE machine_id=? AND status IN ('pending','hold')",(machine_id,)))
+        for lot_id in sorted(impacted):
+            event(lot_id,'Maintenance delay update',dict(fault_id=fault_id,machine_code=machine['code'],machine_name=machine['name'],
+                reason=reason or 'Unexpected machine maintenance',repair_minutes=None,eta=None))
+
     def send_account_email(email, name, password):
         require(app.config['SMTP_HOST'] and app.config['SMTP_FROM'], 'Email delivery is not configured. Set SMTP_HOST, SMTP_USER, SMTP_PASSWORD and SMTP_FROM before creating a client.', 503)
         message = EmailMessage()
@@ -594,6 +602,7 @@ def create_app(database=None, testing=False):
                         update = updates[0]
                         details = json.loads(update['details'])
                         safe['maintenance_updates'].append({'lot_code':lot['code'], 'reason':details.get('reason','Machine maintenance'),
+                            'machine_code':details.get('machine_code'), 'machine_name':details.get('machine_name'),
                             'repair_minutes':details.get('repair_minutes'), 'eta':details.get('eta'), 'created_at':update['created_at']})
                 safe['lots']=[]
                 for lot in order['lots']:
@@ -1019,6 +1028,7 @@ def create_app(database=None, testing=False):
               reason=reason,minimum_downtime_minutes=10))
         if running:
             event(lot_id,'Operation paused for maintenance',dict(machine_id=machine_id,operation_id=running['id']))
+        notify_maintenance_delay(machine_id,fault_id,reason,[lot_id] if lot_id else [])
         return jsonify(ok=True,fault_id=fault_id)
 
     @app.post('/api/faults/<int:fault_id>/estimate')
@@ -1032,6 +1042,9 @@ def create_app(database=None, testing=False):
         db().execute('UPDATE machines SET unavailable_until=? WHERE id=?',(until,fault['machine_id']))
         event(None,'Repair estimate recorded',dict(fault_id=fault_id,repair_minutes=minutes,unavailable_until=until))
         affected=rows("SELECT x.id,x.lot_id,x.seq,x.created_at FROM operations x WHERE x.machine_id=? AND x.status IN ('pending','hold') ORDER BY x.created_at,x.lot_id,x.seq,x.id",(fault['machine_id'],))
+        prior_updates=rows("SELECT lot_id,details FROM events WHERE kind='Maintenance delay update' AND lot_id IS NOT NULL")
+        impacted_lots={item['lot_id'] for item in affected}
+        impacted_lots.update(item['lot_id'] for item in prior_updates if json.loads(item['details']).get('fault_id')==fault_id)
         if minutes >= 120:
             machine=one('SELECT * FROM machines WHERE id=?',(fault['machine_id'],))
             peers=rows('SELECT id FROM machines WHERE class_code=? AND kind=? AND available=1 AND retired=0 AND id<>? ORDER BY id',(machine['class_code'],machine['kind'],machine['id']))
@@ -1042,9 +1055,12 @@ def create_app(database=None, testing=False):
                 target=min(peers,key=lambda peer:(load(peer),peer['id']))
                 db().execute('UPDATE operations SET machine_id=? WHERE id=?',(target['id'],item['id']))
         schedule=forecast(all_operations())
-        for lot_id in sorted({item['lot_id'] for item in affected}):
-            last_eta=max((schedule.get(item['id'],(None,None))[1] for item in affected if item['lot_id']==lot_id and schedule.get(item['id'],(None,None))[1]),default=None)
-            event(lot_id,'Maintenance delay update',dict(reason=fault['reason'] or 'Unexpected machine maintenance',repair_minutes=minutes,
+        all_ops=all_operations()
+        for lot_id in sorted(impacted_lots):
+            lot_op_ids=[op['id'] for op in all_ops if op['lot_id']==lot_id]
+            last_eta=max((schedule.get(op_id,(None,None))[1] for op_id in lot_op_ids if schedule.get(op_id,(None,None))[1]),default=None)
+            event(lot_id,'Maintenance delay update',dict(fault_id=fault_id,machine_code=one('SELECT code FROM machines WHERE id=?',(fault['machine_id'],))['code'],
+                machine_name=one('SELECT name FROM machines WHERE id=?',(fault['machine_id'],))['name'],reason=fault['reason'] or 'Unexpected machine maintenance',repair_minutes=minutes,
                 unavailable_until=until,eta=last_eta,reassigned=minutes>=120 and bool(peers) if minutes>=120 else False))
         return jsonify(ok=True,unavailable_until=until)
 
@@ -1208,13 +1224,14 @@ def create_app(database=None, testing=False):
             require(op['status']=='running' and op['operator_id']==g.user['id'],'Only your running operation can report a machine failure.',409)
             reason=text_value(data,'reason',500)
             schedule_before_failure=forecast(all_operations())
-            waiting_before_failure=rows("SELECT id FROM operations WHERE machine_id=? AND status='pending'",(op['machine_id'],))
+            waiting_before_failure=rows("SELECT id,lot_id FROM operations WHERE machine_id=? AND status='pending'",(op['machine_id'],))
             waiting_before_failure.sort(key=lambda item:(schedule_before_failure.get(item['id'],('~',None))[0] or '~',item['id']))
             db().execute("UPDATE operations SET status='hold',actual_end=? WHERE id=?",(stamp(),operation_id))
             db().execute('UPDATE machines SET available=0,unavailable_until=? WHERE id=?',(stamp(utcnow()+timedelta(minutes=10)),op['machine_id']))
             db().execute('UPDATE work_sessions SET ended_at=? WHERE operation_id=? AND ended_at IS NULL',(stamp(),operation_id))
             fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',(op['machine_id'],operation_id,g.user['id'],stamp(),reason))
             event(op['lot_id'],'Machine failure reported',dict(operation_id=operation_id,machine_id=op['machine_id'],fault_id=fault.lastrowid,reason=reason,minimum_downtime_minutes=10))
+            notify_maintenance_delay(op['machine_id'],fault.lastrowid,reason,[op['lot_id'],*(item['lot_id'] for item in waiting_before_failure)])
             # Move waiting work to the shortest available sister machine, preserving FIFO order through the schedule forecast.
             sisters=rows('SELECT id FROM machines WHERE class_code=? AND available=1 AND retired=0 AND id<>? ORDER BY id',(op['class_code'],op['machine_id']))
             for waiting in waiting_before_failure:
