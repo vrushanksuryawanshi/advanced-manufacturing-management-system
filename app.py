@@ -616,8 +616,14 @@ def create_app(database=None, testing=False):
                         details = json.loads(update['details'])
                         fault_id=details.get('fault_id')
                         if fault_id:
-                            fault=maybe_one("SELECT f.*,m.unavailable_until FROM machine_faults f JOIN machines m ON m.id=f.machine_id WHERE f.id=? AND f.status='open'",(fault_id,))
-                            if fault and fault['repair_minutes'] is not None:
+                            fault=maybe_one("SELECT f.*,m.unavailable_until,m.available,m.code machine_code,m.name machine_name FROM machine_faults f JOIN machines m ON m.id=f.machine_id WHERE f.id=?",(fault_id,))
+                            if fault:
+                                details['operational']=fault['status']=='resolved' and bool(fault['available'])
+                                details['machine_code']=fault['machine_code']
+                                details['machine_name']=fault['machine_name']
+                                if details['operational']:
+                                    details['resolved_at']=fault['resolved_at']
+                            if fault and fault['status']=='open' and fault['repair_minutes'] is not None:
                                 if fault_id not in fault_schedule_cache:
                                     projected_ops,projected_schedule=forecast_after_repair(fault,ops)
                                     fault_schedule_cache[fault_id]=(projected_ops,projected_schedule)
@@ -628,7 +634,8 @@ def create_app(database=None, testing=False):
                                     projected_eta_by_lot[lot['id']]=details['eta']
                         safe['maintenance_updates'].append({'lot_code':lot['code'], 'reason':details.get('reason','Machine maintenance'),
                             'machine_code':details.get('machine_code'), 'machine_name':details.get('machine_name'),
-                            'repair_minutes':details.get('repair_minutes'), 'eta':details.get('eta'), 'created_at':update['created_at']})
+                            'repair_minutes':details.get('repair_minutes'), 'eta':details.get('eta'), 'operational':details.get('operational',False),
+                            'resolved_at':details.get('resolved_at'), 'created_at':update['created_at']})
                 safe['lots']=[]
                 for lot in order['lots']:
                     tracked=next((op for op in lot['operations'] if op['status']!='complete' and op['kind']=='production'),None)
