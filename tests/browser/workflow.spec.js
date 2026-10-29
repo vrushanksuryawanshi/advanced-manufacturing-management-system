@@ -26,12 +26,14 @@ test('manager desktop and phone layouts, route versioning and automatic QR label
   await page.getByRole('button',{name:'Clear route',exact:true}).click();
   for(const code of ['M1','M3','M7','QC','WH']) await page.locator('#studio-floor .floor-station').filter({has:page.locator('strong',{hasText:new RegExp('^'+code+'$')})}).click();
   await page.getByRole('button',{name:'Address 1/4, available',exact:true}).click();
+  await page.getByRole('button',{name:'Address 1/5, available',exact:true}).click();
   await page.getByLabel('Minutes per lot',{exact:true}).first().fill('35');
   await page.screenshot({path:'tmp/screenshots/route-studio.png',fullPage:true});
   await page.getByRole('button',{name:'Save route version'}).click();
   await expect(page.locator('#view-route-version')).toBeVisible();
   await expect(page.locator('dialog .journey')).toContainText('M3');
-  await expect(page.locator('dialog .journey')).toContainText('Address 1/4');
+  await expect(page.locator('dialog .journey')).toContainText('Addresses 1/4, 1/5');
+  await expect(page.locator('dialog .journey')).toContainText('1/5');
   await page.screenshot({path:'tmp/screenshots/product-route.png',fullPage:true});
   await page.getByRole('button',{name:'Close dialog'}).click();
   await expect(page.getByText('2 saved route versions')).toBeVisible();
@@ -50,6 +52,8 @@ test('manager desktop and phone layouts, route versioning and automatic QR label
   await page.screenshot({path:'tmp/screenshots/orders-mobile.png',fullPage:true});
   for(const label of ['Overview','Factory floor','Warehouse','Machine schedule','Products & routes','Machines','Activity log','Team & access']){
     await page.getByRole('button',{name:'Open navigation'}).click();
+    await page.getByRole('button',{name:label,exact:true}).scrollIntoViewIfNeeded();
+    await expect(page.getByRole('button',{name:label,exact:true})).toBeInViewport();
     await page.getByRole('button',{name:label,exact:true}).click();
     await noOverflow(page);
     if(label==='Factory floor')await page.screenshot({path:'tmp/screenshots/factory-floor-mobile.png',fullPage:true});
@@ -64,6 +68,15 @@ test('manager desktop and phone layouts, route versioning and automatic QR label
       await page.getByRole('button',{name:'Close dialog'}).click();
     }
   }
+  await page.getByRole('button',{name:'Edit role & station'}).first().click();
+  await page.getByLabel('Job role').selectOption('qc');
+  await expect(page.getByLabel('Assigned station')).toContainText('QC');
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
+  const operatorCard=page.locator('.card').filter({hasText:'operator@demo.local'});
+  await operatorCard.getByRole('button',{name:'Reset password',exact:true}).click();
+  await expect(page.getByLabel('New password',{exact:true})).toBeVisible();
+  await expect(page.getByLabel('Confirm new password',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:'Cancel',exact:true}).click();
   await page.getByRole('button',{name:'Open navigation'}).click();
   await page.getByRole('button',{name:'Overview',exact:true}).click();
   await page.screenshot({path:'tmp/screenshots/manager-mobile.png',fullPage:true});

@@ -12,3 +12,5 @@ _case_study_build/
 .env
 .env.*
 !.env.example
+
+.vercel

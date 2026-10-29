@@ -97,7 +97,7 @@ Staff register from the sign-in page as a machine operator, quality checker, or 
 
 ### Orders, lots, and QR traceability
 
-- Client, product, route, quantity, lot size, priority, due date, and storage address.
+- Client, product, route, quantity, lot size, priority, due date, and one or more storage addresses.
 - Automatic split into up to 100 lots, including a smaller final lot.
 - Unique order codes, lot codes, and cryptographically random QR tokens.
 - Printable lot-traveler labels with part, quantity, route version, and sequence.
@@ -289,8 +289,8 @@ The included frontend uses a session-based JSON API. It is an internal applicati
 | --- | --- |
 | Session and onboarding | `GET /api/session`, `POST /api/login`, `POST /api/logout`, `GET /api/registration-machines`, `POST /api/operator-register` |
 | Role-filtered workspace | `GET /api/state` |
-| Accounts | `POST /api/users`, `POST /api/operators/:id/approve` |
-| Factory | `POST /api/machines`, `POST /api/machines/:id/availability`, `POST /api/warehouses/:id/rows` |
+| Accounts | `POST /api/users`, `DELETE /api/users/:id`, `PUT /api/users/:id/password`, `POST /api/operators/:id/approve`, `PUT /api/operators/:id/assignment` |
+| Factory | `POST /api/machines`, `DELETE /api/machines/:id`, `POST /api/machines/:id/availability`, `POST /api/warehouses/:id/rows`, `DELETE /api/warehouse-slots/:id` |
 | Products and routes | `POST /api/parts`, `POST /api/routes` |
 | Orders | `POST /api/orders`, `POST /api/orders/:id/approve-eta` |
 | QR and lots | `GET /api/lots/:id/qr`, `GET /api/scan?code=...` |

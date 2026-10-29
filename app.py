@@ -37,20 +37,24 @@ PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
  password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','operator','client')), status TEXT NOT NULL DEFAULT 'approved' CHECK(status IN ('pending','approved')), requested_machine_id INTEGER REFERENCES machines(id));
 CREATE TABLE IF NOT EXISTS machines(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
- kind TEXT NOT NULL CHECK(kind IN ('production','qc','storage')), available INTEGER NOT NULL DEFAULT 1);
+ kind TEXT NOT NULL CHECK(kind IN ('production','qc','storage')), available INTEGER NOT NULL DEFAULT 1,class_code TEXT,unavailable_until TEXT,retired INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS machine_faults(id INTEGER PRIMARY KEY,machine_id INTEGER NOT NULL REFERENCES machines(id),operation_id INTEGER REFERENCES operations(id),reported_by INTEGER REFERENCES users(id),reported_at TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',repair_minutes REAL,status TEXT NOT NULL DEFAULT 'open',resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS work_sessions(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),machine_id INTEGER NOT NULL REFERENCES machines(id),operation_id INTEGER REFERENCES operations(id),started_at TEXT NOT NULL,ended_at TEXT);
+CREATE TABLE IF NOT EXISTS shift_logs(id INTEGER PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),machine_id INTEGER NOT NULL REFERENCES machines(id),shift_code TEXT NOT NULL,group_key TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,extra_hours REAL NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS shift_schedule(user_id INTEGER NOT NULL REFERENCES users(id),work_date TEXT NOT NULL,shift_code TEXT NOT NULL,PRIMARY KEY(user_id,work_date));
 CREATE TABLE IF NOT EXISTS assignments(user_id INTEGER REFERENCES users(id), machine_id INTEGER REFERENCES machines(id), PRIMARY KEY(user_id,machine_id));
 CREATE TABLE IF NOT EXISTS parts(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS routes(id INTEGER PRIMARY KEY, part_id INTEGER NOT NULL REFERENCES parts(id), version INTEGER NOT NULL,
  created_at TEXT NOT NULL, UNIQUE(part_id,version));
 CREATE TABLE IF NOT EXISTS route_steps(id INTEGER PRIMARY KEY, route_id INTEGER NOT NULL REFERENCES routes(id), seq INTEGER NOT NULL,
- machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL);
+ machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,min_minutes REAL NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, client_id INTEGER NOT NULL REFERENCES users(id),
  part_id INTEGER NOT NULL REFERENCES parts(id), route_id INTEGER NOT NULL REFERENCES routes(id), quantity INTEGER NOT NULL,
- priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT);
+ priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, client_approved_at TEXT);
 CREATE TABLE IF NOT EXISTS lots(id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), code TEXT UNIQUE NOT NULL,
  token TEXT UNIQUE NOT NULL, quantity INTEGER NOT NULL, location TEXT);
 CREATE TABLE IF NOT EXISTS operations(id INTEGER PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES lots(id), seq INTEGER NOT NULL,
- machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,
+ machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,min_minutes REAL NOT NULL DEFAULT 1,
  status TEXT NOT NULL DEFAULT 'pending', rank REAL NOT NULL DEFAULT 0, planned_start TEXT, planned_end TEXT,
  actual_start TEXT, actual_end TEXT, operator_id INTEGER REFERENCES users(id), UNIQUE(lot_id,seq));
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_machine ON operations(machine_id) WHERE status='running';
@@ -61,13 +65,15 @@ CREATE TABLE IF NOT EXISTS events(id INTEGER PRIMARY KEY, lot_id INTEGER REFEREN
 CREATE TABLE IF NOT EXISTS warehouse_slots(id INTEGER PRIMARY KEY, machine_id INTEGER NOT NULL REFERENCES machines(id),
  row_number INTEGER NOT NULL, bay_number INTEGER NOT NULL, UNIQUE(machine_id,row_number,bay_number));
 CREATE TABLE IF NOT EXISTS warehouse_reservations(slot_id INTEGER PRIMARY KEY REFERENCES warehouse_slots(id),
- order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id), created_at TEXT NOT NULL);
+ order_id INTEGER NOT NULL REFERENCES orders(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS route_warehouse_slots(route_id INTEGER NOT NULL REFERENCES routes(id),
+ slot_id INTEGER NOT NULL REFERENCES warehouse_slots(id), PRIMARY KEY(route_id,slot_id));
 CREATE TABLE IF NOT EXISTS app_migrations(name TEXT PRIMARY KEY);
 """
 
 POSTGRES_SCHEMA = """
 CREATE TABLE IF NOT EXISTS machines(id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
- kind TEXT NOT NULL CHECK(kind IN ('production','qc','storage')), available INTEGER NOT NULL DEFAULT 1);
+ kind TEXT NOT NULL CHECK(kind IN ('production','qc','storage')), available INTEGER NOT NULL DEFAULT 1, class_code TEXT, unavailable_until TEXT, retired INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS users(id SERIAL PRIMARY KEY, name TEXT NOT NULL, email TEXT UNIQUE NOT NULL,
  password TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('manager','operator','client')), status TEXT NOT NULL DEFAULT 'approved' CHECK(status IN ('pending','approved')), requested_machine_id INTEGER REFERENCES machines(id), worker_type TEXT NOT NULL DEFAULT 'production');
 CREATE TABLE IF NOT EXISTS assignments(user_id INTEGER REFERENCES users(id), machine_id INTEGER REFERENCES machines(id), PRIMARY KEY(user_id,machine_id));
@@ -77,14 +83,14 @@ CREATE TABLE IF NOT EXISTS warehouse_slots(id SERIAL PRIMARY KEY, machine_id INT
 CREATE TABLE IF NOT EXISTS routes(id SERIAL PRIMARY KEY, part_id INTEGER NOT NULL REFERENCES parts(id), version INTEGER NOT NULL,
  created_at TEXT NOT NULL, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id), UNIQUE(part_id,version));
 CREATE TABLE IF NOT EXISTS route_steps(id SERIAL PRIMARY KEY, route_id INTEGER NOT NULL REFERENCES routes(id), seq INTEGER NOT NULL,
- machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL);
+ machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,min_minutes REAL NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS orders(id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, client_id INTEGER NOT NULL REFERENCES users(id),
  part_id INTEGER NOT NULL REFERENCES parts(id), route_id INTEGER NOT NULL REFERENCES routes(id), quantity INTEGER NOT NULL,
- priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id));
+ priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id), client_approved_at TEXT);
 CREATE TABLE IF NOT EXISTS lots(id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), code TEXT UNIQUE NOT NULL,
  token TEXT UNIQUE NOT NULL, quantity INTEGER NOT NULL, location TEXT);
 CREATE TABLE IF NOT EXISTS operations(id SERIAL PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES lots(id), seq INTEGER NOT NULL,
- machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,
+ machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL, min_minutes REAL NOT NULL DEFAULT 1,
  status TEXT NOT NULL DEFAULT 'pending', rank REAL NOT NULL DEFAULT 0, planned_start TEXT, planned_end TEXT,
  actual_start TEXT, actual_end TEXT, operator_id INTEGER REFERENCES users(id), UNIQUE(lot_id,seq));
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_per_machine ON operations(machine_id) WHERE status='running';
@@ -93,12 +99,18 @@ CREATE TABLE IF NOT EXISTS quality(id SERIAL PRIMARY KEY, operation_id INTEGER R
 CREATE TABLE IF NOT EXISTS events(id SERIAL PRIMARY KEY, lot_id INTEGER REFERENCES lots(id), user_id INTEGER REFERENCES users(id),
  kind TEXT NOT NULL, details TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS warehouse_reservations(slot_id INTEGER PRIMARY KEY REFERENCES warehouse_slots(id),
- order_id INTEGER NOT NULL UNIQUE REFERENCES orders(id), created_at TEXT NOT NULL);
+ order_id INTEGER NOT NULL REFERENCES orders(id), created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS route_warehouse_slots(route_id INTEGER NOT NULL REFERENCES routes(id),
+ slot_id INTEGER NOT NULL REFERENCES warehouse_slots(id), PRIMARY KEY(route_id,slot_id));
 CREATE TABLE IF NOT EXISTS app_migrations(name TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS machine_faults(id SERIAL PRIMARY KEY,machine_id INTEGER NOT NULL REFERENCES machines(id),operation_id INTEGER REFERENCES operations(id),reported_by INTEGER REFERENCES users(id),reported_at TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '',repair_minutes REAL,status TEXT NOT NULL DEFAULT 'open',resolved_at TEXT);
+CREATE TABLE IF NOT EXISTS work_sessions(id SERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),machine_id INTEGER NOT NULL REFERENCES machines(id),operation_id INTEGER REFERENCES operations(id),started_at TEXT NOT NULL,ended_at TEXT);
+CREATE TABLE IF NOT EXISTS shift_logs(id SERIAL PRIMARY KEY,user_id INTEGER NOT NULL REFERENCES users(id),machine_id INTEGER NOT NULL REFERENCES machines(id),shift_code TEXT NOT NULL,group_key TEXT NOT NULL,started_at TEXT NOT NULL,ended_at TEXT,extra_hours REAL NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS shift_schedule(user_id INTEGER NOT NULL REFERENCES users(id),work_date TEXT NOT NULL,shift_code TEXT NOT NULL,PRIMARY KEY(user_id,work_date));
 CREATE UNIQUE INDEX IF NOT EXISTS one_station_per_operator ON assignments(user_id);
 """
 
-ID_TABLES = {'users','machines','parts','routes','route_steps','orders','lots','operations','quality','events','warehouse_slots'}
+ID_TABLES = {'users','machines','parts','routes','route_steps','orders','lots','operations','quality','events','warehouse_slots','machine_faults','work_sessions','shift_logs'}
 
 class PostgresCursor:
     def __init__(self, cursor, lastrowid=None):
@@ -137,7 +149,9 @@ class PostgresConnection:
         return PostgresCursor(cursor, lastrowid)
 
     def executemany(self, sql, args):
-        return self.connection.executemany(sql.replace('?', '%s'), args)
+        cursor = self.connection.cursor()
+        cursor.executemany(sql.replace('?', '%s'), args)
+        return PostgresCursor(cursor)
 
     def commit(self):
         self.connection.commit()
@@ -221,8 +235,25 @@ def create_app(database=None, testing=False):
     with closing(connect_database(app.config['DATABASE'])) as conn, conn:
         if is_postgres:
             conn.execute(POSTGRES_SCHEMA)
+            conn.execute('ALTER TABLE machines ADD COLUMN IF NOT EXISTS class_code TEXT')
+            conn.execute('ALTER TABLE machines ADD COLUMN IF NOT EXISTS unavailable_until TEXT')
+            conn.execute('ALTER TABLE machines ADD COLUMN IF NOT EXISTS retired INTEGER NOT NULL DEFAULT 0')
+            conn.execute('ALTER TABLE route_steps ADD COLUMN IF NOT EXISTS min_minutes REAL NOT NULL DEFAULT 1')
+            conn.execute('ALTER TABLE operations ADD COLUMN IF NOT EXISTS min_minutes REAL NOT NULL DEFAULT 1')
+            conn.execute("ALTER TABLE machine_faults ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT ''")
+            conn.execute('ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_approved_at TEXT')
+            conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS worker_type TEXT NOT NULL DEFAULT \'production\'')
+            conn.execute('UPDATE machines SET class_code=code WHERE class_code IS NULL')
+            conn.execute('ALTER TABLE warehouse_reservations DROP CONSTRAINT IF EXISTS warehouse_reservations_order_id_key')
         else:
             conn.executescript(SCHEMA)
+            for table, column, definition in (('machines','class_code','TEXT'),('machines','unavailable_until','TEXT'),('machines','retired','INTEGER NOT NULL DEFAULT 0'),('route_steps','min_minutes','REAL NOT NULL DEFAULT 1'),('operations','min_minutes','REAL NOT NULL DEFAULT 1'),('machine_faults','reason',"TEXT NOT NULL DEFAULT ''"),('orders','client_approved_at','TEXT')):
+                if column not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
+                    conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
+            conn.execute('UPDATE machines SET class_code=code WHERE class_code IS NULL')
+        if not conn.execute("SELECT 1 FROM app_migrations WHERE name='manager_order_approval'").fetchone():
+            conn.execute('UPDATE orders SET client_approved_at=COALESCE(approved_eta,created_at) WHERE client_approved_at IS NULL')
+            conn.execute("INSERT INTO app_migrations(name) VALUES('manager_order_approval')")
         if is_postgres:
             if os.environ.get('INITIAL_MANAGER_EMAIL') and not conn.execute('SELECT 1 FROM users LIMIT 1').fetchone():
                 initial_password = os.environ.get('INITIAL_MANAGER_PASSWORD', '')
@@ -241,6 +272,19 @@ def create_app(database=None, testing=False):
             for table in ('routes','orders'):
                 if 'warehouse_slot_id' not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
                     conn.execute(f'ALTER TABLE {table} ADD COLUMN warehouse_slot_id INTEGER REFERENCES warehouse_slots(id)')
+            if not conn.execute("SELECT 1 FROM app_migrations WHERE name='multiple_warehouse_reservations'").fetchone():
+                conn.executescript('''
+                    PRAGMA foreign_keys=OFF;
+                    BEGIN;
+                    ALTER TABLE warehouse_reservations RENAME TO warehouse_reservations_single;
+                    CREATE TABLE warehouse_reservations(slot_id INTEGER PRIMARY KEY REFERENCES warehouse_slots(id),
+                     order_id INTEGER NOT NULL REFERENCES orders(id), created_at TEXT NOT NULL);
+                    INSERT INTO warehouse_reservations SELECT slot_id,order_id,created_at FROM warehouse_reservations_single;
+                    DROP TABLE warehouse_reservations_single;
+                    INSERT INTO app_migrations(name) VALUES('multiple_warehouse_reservations');
+                    COMMIT;
+                    PRAGMA foreign_keys=ON;
+                ''')
             # Extend the original demo floor once; real installations manage their own inventory.
             if not conn.execute("SELECT 1 FROM app_migrations WHERE name='expanded_demo_floor'").fetchone():
                 if conn.execute("SELECT 1 FROM users WHERE email='manager@demo.local'").fetchone():
@@ -254,6 +298,9 @@ def create_app(database=None, testing=False):
             conn.execute('CREATE UNIQUE INDEX IF NOT EXISTS one_station_per_operator ON assignments(user_id)')
             conn.commit()
             conn.execute('PRAGMA journal_mode=WAL')
+        conn.execute('''INSERT INTO route_warehouse_slots(route_id,slot_id)
+                        SELECT id,warehouse_slot_id FROM routes WHERE warehouse_slot_id IS NOT NULL
+                        ON CONFLICT(route_id,slot_id) DO NOTHING''')
 
     def db():
         if 'db' not in g:
@@ -267,6 +314,10 @@ def create_app(database=None, testing=False):
         result = db().execute(sql, args).fetchone()
         require(result is not None, 'Record not found.', 404)
         return dict(result)
+
+    def maybe_one(sql, args=()):
+        result = db().execute(sql, args).fetchone()
+        return dict(result) if result is not None else None
 
     def event(lot, kind, details):
         db().execute('INSERT INTO events(lot_id,user_id,kind,details,created_at) VALUES(?,?,?,?,?)',
@@ -378,19 +429,16 @@ def create_app(database=None, testing=False):
         require('@' in email and '.' in email.split('@')[-1], 'Enter a valid email address.')
         password = text_value(data, 'password', 128)
         require(len(password) >= 12, 'Use a password of at least 12 characters.')
-        machine_id=data.get('machine_id')
         worker_type=data.get('worker_type','production')
-        require(worker_type in ('production','qc','storage'),'Choose operator, quality checker, or warehouse manager.')
-        machine=one('SELECT kind FROM machines WHERE id=?',(machine_id,))
-        require(machine['kind']==worker_type,'Choose a station matching your job role.')
-        db().execute("INSERT INTO users(name,email,password,role,status,requested_machine_id,worker_type) VALUES(?,?,?,'operator','pending',?,?)", (name,email,generate_password_hash(password),machine_id,worker_type))
+        require(worker_type in ('production','qc','storage','maintenance'),'Choose a valid staff role.')
+        db().execute("INSERT INTO users(name,email,password,role,status,requested_machine_id,worker_type) VALUES(?,?,?,'operator','pending',NULL,?)", (name,email,generate_password_hash(password),worker_type))
         return jsonify(ok=True, message='Registration submitted. A manager must approve your account before you can sign in.'), 201
 
     @app.get('/api/registration-machines')
     def registration_machines():
         worker_type=request.args.get('worker_type','production')
-        require(worker_type in ('production','qc','storage'),'Choose a valid job role.')
-        return jsonify(machines=rows('SELECT id,code,name,kind FROM machines WHERE kind=? ORDER BY id',(worker_type,)))
+        require(worker_type in ('production','qc','storage','maintenance'),'Choose a valid job role.')
+        return jsonify(machines=rows('SELECT id,code,name,kind FROM machines WHERE kind=? AND retired=0 ORDER BY id',(worker_type,)) if worker_type!='maintenance' else rows('SELECT id,code,name,kind FROM machines WHERE retired=0 ORDER BY id'))
 
     @app.post('/api/logout')
     def logout():
@@ -398,9 +446,9 @@ def create_app(database=None, testing=False):
         return jsonify(ok=True)
 
     def all_operations():
-        return rows('''SELECT x.*, m.code machine_code,m.name machine_name,m.kind,m.available,
+        return rows('''SELECT x.*, m.code machine_code,m.name machine_name,m.kind,m.available,m.class_code,m.unavailable_until,
           l.code lot_code,l.quantity,l.order_id,l.location,o.code order_code,o.part_id,o.route_id,o.priority,o.created_at,o.client_id,
-          o.warehouse_slot_id,ws.row_number || '/' || ws.bay_number warehouse_address,
+          o.warehouse_slot_id,o.client_approved_at,ws.row_number || '/' || ws.bay_number warehouse_address,
           p.code part_code,p.name part_name FROM operations x JOIN machines m ON m.id=x.machine_id
           JOIN lots l ON l.id=x.lot_id JOIN orders o ON o.id=l.order_id JOIN parts p ON p.id=o.part_id
           LEFT JOIN warehouse_slots ws ON ws.id=o.warehouse_slot_id''')
@@ -409,7 +457,7 @@ def create_app(database=None, testing=False):
         return rows('''SELECT s.*,s.row_number || '/' || s.bay_number address,m.code warehouse_code,
           r.order_id,o.code order_code,
           CASE WHEN r.order_id IS NULL THEN 'available'
-            WHEN EXISTS(SELECT 1 FROM lots l WHERE l.order_id=r.order_id AND l.location IS NOT NULL) THEN 'occupied'
+            WHEN EXISTS(SELECT 1 FROM lots l WHERE l.order_id=r.order_id AND l.location=s.row_number || '/' || s.bay_number) THEN 'occupied'
             ELSE 'reserved' END status
           FROM warehouse_slots s JOIN machines m ON m.id=s.machine_id
           LEFT JOIN warehouse_reservations r ON r.slot_id=s.id LEFT JOIN orders o ON o.id=r.order_id
@@ -420,6 +468,19 @@ def create_app(database=None, testing=False):
         require(slot['machine_id']==warehouse_id,'Choose an address in the route warehouse.')
         require(not rows('SELECT 1 FROM warehouse_reservations WHERE slot_id=?',(slot_id,)), 'That warehouse address has already been reserved. Refresh and select another available address.',409)
         return slot
+
+    def available_slots(slot_ids, warehouse_id):
+        require(isinstance(slot_ids,list) and slot_ids,'Choose at least one warehouse address.')
+        require(len(slot_ids)<=50,'Select no more than 50 warehouse addresses.')
+        unique=[]
+        for value in slot_ids:
+            try:
+                slot_id=int(value)
+            except (TypeError,ValueError):
+                raise Invalid('Choose valid warehouse addresses.')
+            if slot_id not in unique:
+                unique.append(slot_id)
+        return [available_slot(slot_id,warehouse_id) for slot_id in unique]
 
     def forecast(ops):
         """Serial schedule generation; continuous capacity, one operation per machine.
@@ -446,7 +507,7 @@ def create_app(database=None, testing=False):
                 ends[op['id']] = end
                 available[op['machine_id']] = end
                 result[op['id']] = (op['actual_start'], stamp(end))
-        pending = [o for o in ops if o['status'] == 'pending' and o['available']]
+        pending = [o for o in ops if o['status'] == 'pending' and o['available'] and o['client_approved_at']]
         while pending:
             eligible = [o for o in pending if predecessors[o['id']] is None or predecessors[o['id']] in ends]
             if not eligible:
@@ -503,8 +564,10 @@ def create_app(database=None, testing=False):
             order['progress'] = round(sum(l['progress']*l['quantity'] for l in order['lots'])/order['quantity'])
             states = [l['status'] for l in order['lots']]
             order['status'] = 'finished' if all(s=='finished' for s in states) else 'hold' if 'hold' in states else 'processing' if 'processing' in states else 'waiting'
+            order['completed_at'] = max((l['operations'][-1]['actual_end'] for l in order['lots'] if l['operations'] and l['operations'][-1]['actual_end']), default=None) if order['status']=='finished' else None
             etas = [l['eta'] for l in order['lots']]
             order['eta'] = max(etas) if all(etas) else None
+            order['started'] = any(l['operations'] and l['operations'][0]['actual_start'] for l in order['lots'])
             factory_tz = timezone(timedelta(minutes=app.config['FACTORY_UTC_OFFSET_MINUTES']))
             order['late'] = bool(order['eta'] and dt(order['eta']).astimezone(factory_tz).date().isoformat() > order['due_date'])
         return orders, ops
@@ -518,10 +581,35 @@ def create_app(database=None, testing=False):
             for order in orders:
                 if order['client_id'] != g.user['id']:
                     continue
-                safe = {k:order[k] for k in ('id','code','part_code','part_name','quantity','due_date','progress','status','approved_eta')}
-                safe['stages'] = sorted(set(l['stage'] for l in order['lots']))
+                safe = {k:order[k] for k in ('id','code','part_code','part_name','quantity','due_date','progress','status','completed_at')}
+                safe['approved']=bool(order['client_approved_at'])
+                safe['under_process']=order['started']
+                safe['approved_eta']=order['approved_eta'] if order['started'] else None
+                safe['eta']=order['eta'] if order['started'] else None
+                safe['stages'] = sorted(set(l['stage'] for l in order['lots'])) if order['started'] else ['Awaiting manufacturing']
+                safe['maintenance_updates'] = []
+                for lot in order['lots']:
+                    updates = rows("SELECT details,created_at FROM events WHERE lot_id=? AND kind='Maintenance delay update' ORDER BY id DESC", (lot['id'],))
+                    if updates:
+                        update = updates[0]
+                        details = json.loads(update['details'])
+                        safe['maintenance_updates'].append({'lot_code':lot['code'], 'reason':details.get('reason','Machine maintenance'),
+                            'repair_minutes':details.get('repair_minutes'), 'eta':details.get('eta'), 'created_at':update['created_at']})
+                safe['lots']=[]
+                for lot in order['lots']:
+                    tracked=next((op for op in lot['operations'] if op['status']!='complete' and op['kind']=='production'),None)
+                    if not tracked:
+                        tracked=next((op for op in reversed(lot['operations']) if op['kind']=='production'),None)
+                    safe['lots'].append({'code':lot['code'],'quantity':lot['quantity'],'status':lot['status'],'location':lot['location'],
+                        'stage':tracked['machine_code'] if tracked else lot['stage'],'progress':lot['progress'],
+                        'started_at':tracked['actual_start'] if tracked else None,'stopped_at':tracked['actual_end'] if tracked else None,
+                        'estimated_minutes':tracked['minutes'] if tracked else None,'progress_complete':bool(tracked and tracked['status']=='complete')})
                 safe_orders.append(safe)
             return jsonify(orders=safe_orders, server_time=stamp())
+        archive_cutoff=utcnow()-timedelta(days=7)
+        archived_orders=[o for o in orders if o['status']=='finished' and o['completed_at'] and dt(o['completed_at'])<=archive_cutoff]
+        archived_ids={o['id'] for o in archived_orders}
+        orders=[o for o in orders if o['id'] not in archived_ids]
         machines = rows('SELECT * FROM machines ORDER BY id')
         start = utcnow()-timedelta(hours=24)
         prior_attempts = [json.loads(e['details'])['previous_attempt'] for e in rows("SELECT details FROM events WHERE kind='QC reinspection authorized'")]
@@ -534,15 +622,46 @@ def create_app(database=None, testing=False):
                            workload_minutes=round(sum(o['minutes'] for o in machine_ops if o['status']=='pending')))
         if g.user['role'] == 'operator':
             assigned = [r['machine_id'] for r in rows('SELECT machine_id FROM assignments WHERE user_id=?', (g.user['id'],))]
-            return jsonify(machines=machines, assignments=assigned, operations=[o for o in ops if o['machine_id'] in assigned and o['status']!='complete'],
+            maintenance=g.user['worker_type']=='maintenance'
+            my_hours=sum(max(0,(dt(w['ended_at'] or stamp())-dt(w['started_at'])).total_seconds()/3600) for w in rows('SELECT started_at,ended_at FROM shift_logs WHERE user_id=?',(g.user['id'],)))
+            active_shift=maybe_one('''SELECT s.*,m.code machine_code,m.name machine_name FROM shift_logs s JOIN machines m ON m.id=s.machine_id
+                                WHERE s.user_id=? AND s.ended_at IS NULL ORDER BY s.id DESC LIMIT 1''',(g.user['id'],))
+            local_today=(utcnow()+timedelta(minutes=app.config['FACTORY_UTC_OFFSET_MINUTES'])).date().isoformat()
+            scheduled_shift=maybe_one('SELECT work_date,shift_code FROM shift_schedule WHERE user_id=? AND work_date=?',(g.user['id'],local_today))
+            return jsonify(machines=machines, assignments=assigned, operations=[o for o in ops if (maintenance or o['machine_id'] in assigned) and o['status']!='complete'],
+                           faults=rows("SELECT f.*,m.code machine_code,m.name machine_name,u.name reporter FROM machine_faults f JOIN machines m ON m.id=f.machine_id LEFT JOIN users u ON u.id=f.reported_by WHERE f.status='open' ORDER BY f.reported_at"),
+                           work_hours=[{'user_id':g.user['id'],'name':g.user['name'],'hours':round(my_hours,2)}],active_shift=active_shift,scheduled_shift=scheduled_shift,
                            warehouse_slots=[s for s in warehouse_state() if s['machine_id'] in assigned], server_time=stamp())
         routes = rows('SELECT * FROM routes ORDER BY id DESC')
         for route in routes:
             route['steps'] = rows('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq', (route['id'],))
-        return jsonify(orders=orders, machines=machines, parts=rows('SELECT * FROM parts ORDER BY code'), routes=routes,
+            route['warehouse_slot_ids'] = [r['slot_id'] for r in rows('SELECT slot_id FROM route_warehouse_slots WHERE route_id=? ORDER BY slot_id',(route['id'],))]
+        for order in orders:
+            order['warehouse_slot_ids'] = [r['slot_id'] for r in rows('SELECT slot_id FROM warehouse_reservations WHERE order_id=? ORDER BY slot_id',(order['id'],))]
+        sessions=rows("SELECT u.id user_id,u.name,w.started_at,w.ended_at FROM users u LEFT JOIN shift_logs w ON w.user_id=u.id WHERE u.role='operator' AND u.worker_type!='maintenance' ORDER BY u.name,w.started_at")
+        totals={};monthly_map={}
+        for w in sessions:
+            item=totals.setdefault(w['user_id'],{'user_id':w['user_id'],'name':w['name'],'hours':0.0})
+            if w['started_at']:
+                hrs=max(0,(dt(w['ended_at'] or stamp())-dt(w['started_at'])).total_seconds()/3600);item['hours']+=hrs
+                if dt(w['started_at'])>=utcnow()-timedelta(days=365):
+                    key=(w['user_id'],w['started_at'][:7]);row=monthly_map.setdefault(key,{'user_id':w['user_id'],'name':w['name'],'month':w['started_at'][:7],'hours':0.0});row['hours']+=hrs
+        hours=[{**v,'hours':round(v['hours'],2)} for v in totals.values()]
+        monthly=[{**v,'hours':round(v['hours'],2)} for v in sorted(monthly_map.values(),key=lambda x:(x['month'],x['name']))]
+        local_today=(utcnow()+timedelta(minutes=app.config['FACTORY_UTC_OFFSET_MINUTES'])).date()
+        roster_week=(local_today-timedelta(days=local_today.weekday())).isoformat()
+        return jsonify(orders=orders, archived_orders=archived_orders, machines=machines, parts=rows('SELECT * FROM parts ORDER BY code'), routes=routes,
                        warehouse_slots=warehouse_state(),
                        users=rows('SELECT id,name,email,role,status,requested_machine_id,worker_type FROM users ORDER BY name'),
                        assignments=rows('SELECT * FROM assignments'),
+                       worker_hours=hours,monthly_worker_hours=monthly,
+                       shift_logs=rows('''SELECT s.id,s.user_id,u.name worker_name,s.machine_id,m.code machine_code,m.name machine_name,
+                         s.shift_code,s.group_key,s.started_at,s.ended_at,s.extra_hours FROM shift_logs s JOIN users u ON u.id=s.user_id
+                         JOIN machines m ON m.id=s.machine_id ORDER BY s.id DESC'''),
+                       shift_schedule=rows('''SELECT s.user_id,u.name worker_name,s.work_date,s.shift_code FROM shift_schedule s
+                         JOIN users u ON u.id=s.user_id WHERE s.work_date>=? AND s.work_date<? ORDER BY u.name,s.work_date''',
+                         (roster_week,(local_today+timedelta(days=6-local_today.weekday())).isoformat())),shift_week=roster_week,
+                       faults=rows("SELECT f.*,m.code machine_code,m.name machine_name,u.name reporter FROM machine_faults f JOIN machines m ON m.id=f.machine_id LEFT JOIN users u ON u.id=f.reported_by WHERE f.status='open' ORDER BY f.reported_at"),
                        events=rows('''SELECT e.*,u.name actor,l.code lot_code FROM events e LEFT JOIN users u ON u.id=e.user_id
                          LEFT JOIN lots l ON l.id=e.lot_id ORDER BY e.id DESC LIMIT 100'''), server_time=stamp(), scheduling_mode='Continuous availability (24/7)')
 
@@ -558,10 +677,86 @@ def create_app(database=None, testing=False):
     def add_machine():
         data = request.get_json() or {}
         require(data.get('kind') in ('production','qc','storage'), 'Select a valid station type.')
-        cur = db().execute('INSERT INTO machines(code,name,kind) VALUES(?,?,?)', (text_value(data,'code',30),text_value(data,'name',120),data['kind']))
-        if data['kind']=='storage':
-            db().executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(?,?,?)',[(cur.lastrowid,r,b) for r in range(1,4) for b in range(1,11)])
-        return jsonify(id=cur.lastrowid), 201
+        prefix=text_value(data,'code',24).strip(); name=text_value(data,'name',100); count=number(data,'count',1,50,True)
+        class_code=prefix.upper(); made=[]
+        for n in range(1,count+1):
+            code=f'{class_code} {n:02d}' if count>1 else class_code
+            cur=db().execute('INSERT INTO machines(code,name,kind,class_code) VALUES(?,?,?,?)',(code,name if count==1 else f'{name} {n:02d}',data['kind'],class_code))
+            if data['kind']=='storage':
+                db().executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(?,?,?)',[(cur.lastrowid,r,b) for r in range(1,4) for b in range(1,11)])
+            made.append(code)
+        return jsonify(codes=made), 201
+
+    @app.put('/api/machine-groups/<path:class_code>')
+    @auth('manager')
+    def resize_machine_group(class_code):
+        data=request.get_json() or {}
+        target=number(data,'count',1,50,True)
+        group=rows('SELECT * FROM machines WHERE class_code=? ORDER BY code,id',(class_code.upper(),))
+        require(group,'Machine group not found.',404)
+        active=[m for m in group if not m['retired']]
+        require(target>=1,'A machine group must keep at least one active machine.')
+        if target<len(active):
+            retiring=sorted(active,key=lambda m:(int(m['code'].rsplit(' ',1)[1]) if m['code'].rsplit(' ',1)[-1].isdigit() else 1,m['id']),reverse=True)[:len(active)-target]
+            keep=[m for m in active if m['id'] not in {r['id'] for r in retiring}]
+            for machine in retiring:
+                require(not rows("SELECT 1 FROM operations WHERE machine_id=? AND status='running' LIMIT 1",(machine['id'],)),
+                        f"{machine['code']} has work in progress. Finish it before reducing this group.",409)
+                if machine['kind']=='storage':
+                    require(not rows('SELECT 1 FROM warehouse_reservations wr JOIN warehouse_slots ws ON ws.id=wr.slot_id WHERE ws.machine_id=? LIMIT 1',(machine['id'],)),
+                            f"{machine['code']} has reserved stock. Move those reservations before reducing this group.",409)
+                peers=[m for m in keep if m['kind']==machine['kind'] and m['available']]
+                pending=rows("SELECT id FROM operations WHERE machine_id=? AND status='pending' ORDER BY id",(machine['id'],))
+                require(not pending or peers,f"{machine['code']} has queued work and no available replacement.",409)
+                for op in pending:
+                    peer=min(peers,key=lambda m:len(rows("SELECT id FROM operations WHERE machine_id=? AND status IN ('pending','running')",(m['id'],))))
+                    db().execute('UPDATE operations SET machine_id=? WHERE id=?',(peer['id'],op['id']))
+                db().execute('DELETE FROM assignments WHERE machine_id=?',(machine['id'],))
+                db().execute('UPDATE users SET requested_machine_id=NULL WHERE requested_machine_id=?',(machine['id'],))
+                db().execute('UPDATE machines SET retired=1 WHERE id=?',(machine['id'],))
+        elif target>len(active):
+            restore=sorted((m for m in group if m['retired']),key=lambda m:m['id'],reverse=True)
+            for machine in restore[:target-len(active)]:
+                db().execute('UPDATE machines SET retired=0,available=1,unavailable_until=NULL WHERE id=?',(machine['id'],))
+            missing=target-len(active)-min(target-len(active),len(restore))
+            last=max(group,key=lambda m:m['id'])
+            code_numbers=[int(m['code'].rsplit(' ',1)[1]) for m in group if m['code'].rsplit(' ',1)[-1].isdigit()]
+            next_number=max(code_numbers or [0])+1
+            for offset in range(missing):
+                number_value=next_number+offset
+                code=f"{class_code.upper()} {number_value:02d}"
+                name=last['name'].rsplit(' ',1)[0] if last['name'].rsplit(' ',1)[-1].isdigit() else last['name']
+                cur=db().execute('INSERT INTO machines(code,name,kind,class_code) VALUES(?,?,?,?)',(code,f'{name} {number_value:02d}',last['kind'],class_code.upper()))
+                if last['kind']=='storage':
+                    db().executemany('INSERT INTO warehouse_slots(machine_id,row_number,bay_number) VALUES(?,?,?)',[(cur.lastrowid,r,b) for r in range(1,4) for b in range(1,11)])
+        event(None,'Machine group resized',dict(class_code=class_code.upper(),previous_count=len(active),new_count=target))
+        return jsonify(class_code=class_code.upper(),count=target)
+
+    @app.delete('/api/machines/<int:machine_id>')
+    @auth('manager')
+    def delete_machine(machine_id):
+        machine=one('SELECT * FROM machines WHERE id=?',(machine_id,))
+        blockers=[]
+        if rows('SELECT 1 FROM route_steps WHERE machine_id=? LIMIT 1',(machine_id,)):
+            blockers.append('a saved product route')
+        if rows('SELECT 1 FROM operations WHERE machine_id=? LIMIT 1',(machine_id,)):
+            blockers.append('production order history')
+        if rows('SELECT 1 FROM assignments WHERE machine_id=? LIMIT 1',(machine_id,)):
+            blockers.append('an approved staff assignment')
+        if rows('SELECT 1 FROM users WHERE requested_machine_id=? LIMIT 1',(machine_id,)):
+            blockers.append('a staff registration request')
+        if rows('''SELECT 1 FROM warehouse_reservations wr
+                   JOIN warehouse_slots ws ON ws.id=wr.slot_id
+                   WHERE ws.machine_id=? LIMIT 1''',(machine_id,)):
+            blockers.append('a warehouse reservation')
+        require(not blockers,
+                f"Cannot remove {machine['code']} because it is used by " + ', '.join(blockers) + '. Preserve it for traceability or mark it unavailable instead.',
+                409)
+        event(None,'Machine removed',dict(machine_id=machine_id,code=machine['code'],name=machine['name'],kind=machine['kind']))
+        if machine['kind']=='storage':
+            db().execute('DELETE FROM warehouse_slots WHERE machine_id=?',(machine_id,))
+        db().execute('DELETE FROM machines WHERE id=?',(machine_id,))
+        return jsonify(ok=True)
 
     @app.post('/api/warehouses/<int:warehouse_id>/rows')
     @auth('manager')
@@ -586,11 +781,31 @@ def create_app(database=None, testing=False):
         db().execute('DELETE FROM warehouse_reservations WHERE slot_id=?',(slot_id,))
         return jsonify(ok=True)
 
+    @app.delete('/api/warehouse-slots/<int:slot_id>')
+    @auth('manager')
+    def delete_warehouse_slot(slot_id):
+        slot=one('''SELECT s.*,m.code warehouse_code FROM warehouse_slots s
+                    JOIN machines m ON m.id=s.machine_id WHERE s.id=?''',(slot_id,))
+        blockers=[]
+        if rows('SELECT 1 FROM warehouse_reservations WHERE slot_id=? LIMIT 1',(slot_id,)):
+            blockers.append('an active warehouse reservation')
+        if rows('SELECT 1 FROM routes WHERE warehouse_slot_id=? LIMIT 1',(slot_id,)) or rows('SELECT 1 FROM route_warehouse_slots WHERE slot_id=? LIMIT 1',(slot_id,)):
+            blockers.append('a saved product route')
+        if rows('SELECT 1 FROM orders WHERE warehouse_slot_id=? LIMIT 1',(slot_id,)):
+            blockers.append('production order history')
+        require(not blockers,
+                f"Cannot remove address {slot['row_number']}/{slot['bay_number']} because it is used by " + ', '.join(blockers) + '.',
+                409)
+        event(None,'Warehouse address removed',dict(slot_id=slot_id,warehouse=slot['warehouse_code'],address=f"{slot['row_number']}/{slot['bay_number']}"))
+        db().execute('DELETE FROM warehouse_slots WHERE id=?',(slot_id,))
+        return jsonify(ok=True)
+
     @app.post('/api/machines/<int:machine_id>/availability')
     @auth('manager')
     def availability(machine_id):
         one('SELECT id FROM machines WHERE id=?',(machine_id,))
         require(isinstance((request.json or {}).get('available'), bool), 'Availability must be true or false.')
+        require(not request.json['available'] or not rows("SELECT 1 FROM machine_faults WHERE machine_id=? AND status='open' LIMIT 1",(machine_id,)),'Maintenance must repair and restart this machine before it can return to service.',409)
         require(not rows("SELECT id FROM operations WHERE machine_id=? AND status='running'",(machine_id,)), 'Finish the active operation before changing availability.',409)
         reason = text_value(request.json,'reason',500)
         db().execute('UPDATE machines SET available=? WHERE id=?',(int(request.json['available']),machine_id))
@@ -611,23 +826,241 @@ def create_app(database=None, testing=False):
         if data['role']=='operator':
             machine_id = data.get('machine_id')
             worker_type=data.get('worker_type','production')
-            require(worker_type in ('production','qc','storage'),'Choose a valid job role.')
-            require(one('SELECT kind FROM machines WHERE id=?',(machine_id,))['kind']==worker_type,'Choose a station matching the job role.')
+            require(worker_type in ('production','qc','storage','maintenance'),'Choose a valid job role.')
             db().execute('UPDATE users SET worker_type=? WHERE id=?',(worker_type,cur.lastrowid))
-            db().execute('INSERT INTO assignments VALUES(?,?)',(cur.lastrowid,machine_id))
         else:
             send_account_email(email, name, password)
         return jsonify(id=cur.lastrowid),201
 
+    @app.delete('/api/users/<int:user_id>')
+    @auth('manager')
+    def delete_client(user_id):
+        client=one('SELECT * FROM users WHERE id=?',(user_id,))
+        require(client['role']=='client','Only client accounts can be removed.',400)
+        require(not rows('SELECT 1 FROM orders WHERE client_id=? LIMIT 1',(user_id,)),
+                'This client has production orders and must be preserved for traceability.',409)
+        event(None,'Client removed',dict(client_id=user_id,name=client['name'],email=client['email']))
+        db().execute('DELETE FROM users WHERE id=?',(user_id,))
+        return jsonify(ok=True)
+
+    @app.put('/api/users/<int:user_id>/password')
+    @auth('manager')
+    def reset_user_password(user_id):
+        account=one('SELECT id,name,email,role FROM users WHERE id=?',(user_id,))
+        require(account['role'] in ('operator','client'),'Only staff and client passwords can be changed.',400)
+        password=text_value(request.get_json() or {},'password',128)
+        require(len(password)>=12,'Use a password of at least 12 characters.')
+        db().execute('UPDATE users SET password=? WHERE id=?',(generate_password_hash(password),user_id))
+        event(None,'Account password changed',dict(user_id=user_id,name=account['name'],email=account['email'],role=account['role']))
+        return jsonify(ok=True)
+
     @app.post('/api/operators/<int:user_id>/approve')
     @auth('manager')
     def approve_operator(user_id):
-        data=request.get_json() or {}
         operator=one("SELECT id,worker_type FROM users WHERE id=? AND role='operator' AND status='pending'",(user_id,))
-        machine_id=data.get('machine_id')
-        require(one('SELECT kind FROM machines WHERE id=?',(machine_id,))['kind']==operator['worker_type'],'Choose a station matching this staff member’s job role.')
-        db().execute("INSERT INTO assignments(user_id,machine_id) VALUES(?,?)",(operator['id'],machine_id))
-        db().execute("UPDATE users SET status='approved' WHERE id=?",(user_id,))
+        db().execute("UPDATE users SET status='approved',requested_machine_id=NULL WHERE id=?",(user_id,))
+        return jsonify(ok=True)
+
+    @app.put('/api/operators/<int:user_id>/assignment')
+    @auth('manager')
+    def update_operator_assignment(user_id):
+        data=request.get_json() or {}
+        operator=one("SELECT id,name,worker_type FROM users WHERE id=? AND role='operator' AND status='approved'",(user_id,))
+        worker_type=data.get('worker_type')
+        require(worker_type in ('production','qc','storage','maintenance'),'Choose a valid job role.')
+        require(not rows("SELECT 1 FROM operations WHERE operator_id=? AND status='running' LIMIT 1",(user_id,)),
+                'This worker has an active operation. Complete or release it before changing the assignment.',409)
+        previous_matches=rows('''SELECT m.id,m.code FROM assignments a JOIN machines m ON m.id=a.machine_id
+                                 WHERE a.user_id=?''',(user_id,))
+        previous=previous_matches[0] if previous_matches else None
+        role_changed=worker_type!=operator['worker_type']
+        if role_changed:
+            db().execute('DELETE FROM assignments WHERE user_id=?',(user_id,))
+        db().execute('UPDATE users SET worker_type=?,requested_machine_id=NULL WHERE id=?',(worker_type,user_id))
+        event(None,'Staff role changed',dict(user_id=user_id,name=operator['name'],previous_role=operator['worker_type'],
+              new_role=worker_type,previous_machine=previous['code'] if previous else None,
+              new_machine=previous['code'] if previous and not role_changed else None))
+        return jsonify(ok=True)
+
+    @app.post('/api/workers/select-machine')
+    @auth('operator')
+    def select_worker_machine():
+        machine=one('SELECT id,kind,retired FROM machines WHERE id=?',(request.json.get('machine_id'),))
+        require(not machine['retired'],'This machine group member is retired.',409)
+        require(machine['kind']==g.user['worker_type'],'Choose a machine matching your work role.')
+        require(not rows("SELECT 1 FROM operations WHERE operator_id=? AND status='running' LIMIT 1",(g.user['id'],)),'Finish the current operation before changing machines.',409)
+        db().execute('DELETE FROM assignments WHERE user_id=?',(g.user['id'],))
+        db().execute('INSERT INTO assignments(user_id,machine_id) VALUES(?,?)',(g.user['id'],machine['id']))
+        event(None,'Worker selected machine',dict(machine_id=machine['id']))
+        return jsonify(ok=True)
+
+    @app.get('/api/shift-schedule')
+    @auth('manager')
+    def get_shift_schedule():
+        try:
+            week_start=datetime.strptime(request.args.get('week_start',''),'%Y-%m-%d').date()
+        except ValueError:
+            raise Invalid('Choose a valid Monday for the roster week.')
+        require(week_start.weekday()==0,'The roster week must start on Monday.')
+        week_end=week_start+timedelta(days=6)
+        schedule=rows('''SELECT s.user_id,u.name worker_name,s.work_date,s.shift_code FROM shift_schedule s
+                         JOIN users u ON u.id=s.user_id WHERE s.work_date>=? AND s.work_date<? ORDER BY u.name,s.work_date''',
+                      (week_start.isoformat(),week_end.isoformat()))
+        return jsonify(week_start=week_start.isoformat(),schedule=schedule)
+
+    @app.post('/api/shift-schedule')
+    @auth('manager')
+    def save_shift_schedule():
+        data=request.get_json() or {}
+        try:
+            work_date=datetime.strptime(str(data.get('work_date','')),'%Y-%m-%d').date()
+            user_id=int(data.get('user_id'))
+        except (TypeError,ValueError):
+            raise Invalid('Choose a valid worker and work date.')
+        require(work_date.weekday()<6,'Weekly shifts can only be scheduled Monday through Saturday.')
+        shift_code=data.get('shift_code') or None
+        require(shift_code in (None,'off','first','second','night'),'Choose a valid shift or clear the day.')
+        worker=one("SELECT id,name FROM users WHERE id=? AND role='operator' AND status='approved' AND worker_type!='maintenance'",(user_id,))
+        require(worker is not None,'Choose an approved production, quality or warehouse worker.',404)
+        fill_week=bool(data.get('fill_week')) and work_date.weekday()==0
+        work_dates=[work_date+timedelta(days=i) for i in range(6)] if fill_week else [work_date]
+        for scheduled_date in work_dates:
+            if shift_code is None:
+                db().execute('DELETE FROM shift_schedule WHERE user_id=? AND work_date=?',(user_id,scheduled_date.isoformat()))
+            else:
+                db().execute('''INSERT INTO shift_schedule(user_id,work_date,shift_code) VALUES(?,?,?)
+                                ON CONFLICT(user_id,work_date) DO UPDATE SET shift_code=excluded.shift_code''',
+                             (user_id,scheduled_date.isoformat(),shift_code))
+        event(None,'Worker shift scheduled',dict(worker_id=user_id,worker_name=worker['name'],work_dates=[d.isoformat() for d in work_dates],shift_code=shift_code,filled_week=fill_week))
+        return jsonify(ok=True)
+
+    @app.post('/api/workers/start-shift')
+    @auth('operator')
+    def start_worker_shift():
+        data=request.get_json() or {}
+        shift_code=data.get('shift_code')
+        require(shift_code in ('first','second','night'),'Choose a valid shift.')
+        local_today=(utcnow()+timedelta(minutes=app.config['FACTORY_UTC_OFFSET_MINUTES'])).date().isoformat()
+        scheduled=maybe_one('SELECT shift_code FROM shift_schedule WHERE user_id=? AND work_date=?',(g.user['id'],local_today))
+        active=maybe_one("SELECT * FROM shift_logs WHERE user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",(g.user['id'],))
+        require(not scheduled or scheduled['shift_code']==shift_code or (active and active['shift_code']==shift_code),
+                'Your manager scheduled a different shift for today. Check your roster.',409)
+        machine=one('SELECT id,kind,retired FROM machines WHERE id=?',(data.get('machine_id'),))
+        require(machine is not None,'Choose a valid machine.',404)
+        require(not machine['retired'],'This machine is retired.',409)
+        require(machine['kind']==g.user['worker_type'],'Choose a machine matching your work role.')
+        require(not rows("SELECT 1 FROM operations WHERE operator_id=? AND status='running' LIMIT 1",(g.user['id'],)),
+                'Finish the current operation before starting or switching shifts.',409)
+        if active:
+            require(active['shift_code']==shift_code,'End your current shift before choosing a different shift.',409)
+            if active['machine_id']==machine['id']:
+                return jsonify(ok=True,active_shift=active['id'])
+            db().execute('UPDATE shift_logs SET ended_at=? WHERE id=?',(stamp(),active['id']))
+            group_key=active['group_key']
+        else:
+            group_key=secrets.token_hex(16)
+        db().execute('DELETE FROM assignments WHERE user_id=?',(g.user['id'],))
+        db().execute('INSERT INTO assignments(user_id,machine_id) VALUES(?,?)',(g.user['id'],machine['id']))
+        db().execute('INSERT INTO shift_logs(user_id,machine_id,shift_code,group_key,started_at) VALUES(?,?,?,?,?)',
+                     (g.user['id'],machine['id'],shift_code,group_key,stamp()))
+        event(None,'Worker shift started',dict(machine_id=machine['id'],shift_code=shift_code,group_key=group_key))
+        return jsonify(ok=True)
+
+    @app.post('/api/workers/end-shift')
+    @auth('operator')
+    def end_worker_shift():
+        require(not rows("SELECT 1 FROM operations WHERE operator_id=? AND status='running' LIMIT 1",(g.user['id'],)),
+                'Complete or report the active operation before ending your shift.',409)
+        active=maybe_one("SELECT * FROM shift_logs WHERE user_id=? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",(g.user['id'],))
+        require(active is not None,'There is no active shift to end.',409)
+        ended=stamp()
+        db().execute('UPDATE shift_logs SET ended_at=? WHERE id=?',(ended,active['id']))
+        segments=rows('SELECT id,started_at,ended_at FROM shift_logs WHERE group_key=? ORDER BY id',(active['group_key'],))
+        total_minutes=sum(max(0,(dt(w['ended_at'] or ended)-dt(w['started_at'])).total_seconds()/60) for w in segments)
+        local_zone=timezone(timedelta(minutes=app.config['FACTORY_UTC_OFFSET_MINUTES']))
+        local_start=dt(segments[0]['started_at']).astimezone(local_zone)
+        shift_end_hour={'first':14,'second':22,'night':6}[active['shift_code']]
+        scheduled_end=local_start.replace(hour=shift_end_hour,minute=0,second=0,microsecond=0)
+        if active['shift_code']=='night' and local_start.hour>=22:
+            scheduled_end+=timedelta(days=1)
+        overtime_minutes=max(0,(dt(ended)-scheduled_end.astimezone(timezone.utc)).total_seconds()/60)
+        extra_hours=round(overtime_minutes/60,2)
+        db().execute('UPDATE shift_logs SET extra_hours=0 WHERE group_key=?',(active['group_key'],))
+        db().execute('UPDATE shift_logs SET extra_hours=? WHERE id=?',(extra_hours,active['id']))
+        db().execute('DELETE FROM assignments WHERE user_id=?',(g.user['id'],))
+        event(None,'Worker shift ended',dict(machine_id=active['machine_id'],shift_code=active['shift_code'],worked_minutes=round(total_minutes),extra_hours=extra_hours))
+        return jsonify(ok=True,extra_hours=extra_hours)
+
+    @app.post('/api/workers/report-fault')
+    @auth('operator')
+    def report_worker_machine_fault():
+        require(g.user['worker_type']!='maintenance','Maintenance staff cannot report their own repair queue.',403)
+        data=request.get_json() or {}
+        machine_id=number(data,'machine_id',1,1000000,True)
+        machine=one('SELECT * FROM machines WHERE id=?',(machine_id,))
+        require(machine['kind']==g.user['worker_type'] and not machine['retired'],'This machine does not match your work role.',403)
+        require(rows('SELECT 1 FROM assignments WHERE user_id=? AND machine_id=?',(g.user['id'],machine_id)),
+                'Select this station before reporting a machine fault.',403)
+        active=maybe_one("SELECT id FROM shift_logs WHERE user_id=? AND machine_id=? AND ended_at IS NULL",(g.user['id'],machine_id))
+        require(active is not None,'Start your shift on this machine before reporting a fault.',409)
+        require(machine['available'],'This machine is already reported unavailable.',409)
+        reason=text_value(data,'reason',500)
+        running=maybe_one("SELECT * FROM operations WHERE machine_id=? AND status='running' ORDER BY id DESC LIMIT 1",(machine_id,))
+        if running:
+            db().execute("UPDATE operations SET status='hold',actual_end=? WHERE id=?",(stamp(),running['id']))
+            db().execute('UPDATE work_sessions SET ended_at=? WHERE operation_id=? AND ended_at IS NULL',(stamp(),running['id']))
+        until=stamp(utcnow()+timedelta(minutes=10))
+        db().execute('UPDATE machines SET available=0,unavailable_until=? WHERE id=?',(until,machine_id))
+        fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',
+                           (machine_id,running['id'] if running else None,g.user['id'],stamp(),reason))
+        fault_id=fault.lastrowid
+        lot_id=running['lot_id'] if running else None
+        event(lot_id,'Machine failure reported',dict(machine_id=machine_id,fault_id=fault_id,operation_id=running['id'] if running else None,
+              reason=reason,minimum_downtime_minutes=10))
+        if running:
+            event(lot_id,'Operation paused for maintenance',dict(machine_id=machine_id,operation_id=running['id']))
+        return jsonify(ok=True,fault_id=fault_id)
+
+    @app.post('/api/faults/<int:fault_id>/estimate')
+    @auth('operator')
+    def fault_repair_estimate(fault_id):
+        require(g.user['worker_type']=='maintenance','Only maintenance staff can update repair estimates.',403)
+        fault=one("SELECT * FROM machine_faults WHERE id=? AND status='open'",(fault_id,))
+        minutes=number(request.json,'repair_minutes',1,10080)
+        until=stamp(utcnow()+timedelta(minutes=max(10,minutes)))
+        db().execute('UPDATE machine_faults SET repair_minutes=? WHERE id=?',(minutes,fault_id))
+        db().execute('UPDATE machines SET unavailable_until=? WHERE id=?',(until,fault['machine_id']))
+        event(None,'Repair estimate recorded',dict(fault_id=fault_id,repair_minutes=minutes,unavailable_until=until))
+        affected=rows("SELECT x.id,x.lot_id,x.seq,x.created_at FROM operations x WHERE x.machine_id=? AND x.status IN ('pending','hold') ORDER BY x.created_at,x.lot_id,x.seq,x.id",(fault['machine_id'],))
+        if minutes >= 120:
+            machine=one('SELECT * FROM machines WHERE id=?',(fault['machine_id'],))
+            peers=rows('SELECT id FROM machines WHERE class_code=? AND kind=? AND available=1 AND retired=0 AND id<>? ORDER BY id',(machine['class_code'],machine['kind'],machine['id']))
+            for item in affected:
+                if not peers: break
+                def load(peer):
+                    return sum(op['minutes'] for op in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(peer['id'],)))
+                target=min(peers,key=lambda peer:(load(peer),peer['id']))
+                db().execute('UPDATE operations SET machine_id=? WHERE id=?',(target['id'],item['id']))
+        schedule=forecast(all_operations())
+        for lot_id in sorted({item['lot_id'] for item in affected}):
+            last_eta=max((schedule.get(item['id'],(None,None))[1] for item in affected if item['lot_id']==lot_id and schedule.get(item['id'],(None,None))[1]),default=None)
+            event(lot_id,'Maintenance delay update',dict(reason=fault['reason'] or 'Unexpected machine maintenance',repair_minutes=minutes,
+                unavailable_until=until,eta=last_eta,reassigned=minutes>=120 and bool(peers) if minutes>=120 else False))
+        return jsonify(ok=True,unavailable_until=until)
+
+    @app.post('/api/faults/<int:fault_id>/restart')
+    @auth('operator')
+    def restart_repaired_machine(fault_id):
+        require(g.user['worker_type']=='maintenance','Only maintenance staff can restart a machine.',403)
+        fault=one("SELECT * FROM machine_faults WHERE id=? AND status='open'",(fault_id,))
+        machine=one('SELECT * FROM machines WHERE id=?',(fault['machine_id'],))
+        require(fault['repair_minutes'] is not None,'Enter a repair time before restarting this machine.',409)
+        require(not machine['unavailable_until'] or dt(machine['unavailable_until'])<=utcnow(),'This machine must stay offline for at least 10 minutes after failure.',409)
+        db().execute('UPDATE machines SET available=1,unavailable_until=NULL WHERE id=?',(machine['id'],))
+        db().execute("UPDATE machine_faults SET status='resolved',resolved_at=? WHERE id=?",(stamp(),fault_id))
+        if fault['operation_id']:
+            db().execute("UPDATE operations SET status='pending',actual_start=NULL,actual_end=NULL,operator_id=NULL WHERE id=? AND status='hold'",(fault['operation_id'],))
+        event(None,'Machine returned to service',dict(machine_id=machine['id'],fault_id=fault_id))
         return jsonify(ok=True)
 
     @app.post('/api/routes')
@@ -640,15 +1073,21 @@ def create_app(database=None, testing=False):
         checked=[]
         for step in steps:
             machine=one('SELECT * FROM machines WHERE id=?',(step.get('machine_id'),))
-            checked.append((machine,number(step,'minutes',0.1,10080),number(step,'transition_minutes',0,1440),str(step.get('instructions','')).strip()[:2000]))
+            require(not machine['retired'],'Retired machines cannot be added to a new route.',409)
+            minutes=number(step,'minutes',1,10080)
+            checked.append((machine,minutes,number(step,'transition_minutes',0,1440),str(step.get('instructions','')).strip()[:2000],number(step,'min_minutes',1,minutes)))
         require(checked[-1][0]['kind']=='storage' and checked[-2][0]['kind']=='qc' and all(s[0]['kind']=='production' for s in checked[:-2]), 'Route must end with QC then storage, with production steps before them.')
-        slot=available_slot(data.get('warehouse_slot_id'),checked[-1][0]['id'])
+        requested_slots=data.get('warehouse_slot_ids')
+        if not isinstance(requested_slots,list):
+            requested_slots=[data.get('warehouse_slot_id')]
+        slots=available_slots(requested_slots,checked[-1][0]['id'])
         version_result=db().execute('SELECT COALESCE(MAX(version),0)+1 AS next_version FROM routes WHERE part_id=?',(part['id'],)).fetchone()
         version=version_result['next_version'] if is_postgres else version_result[0]
-        cur=db().execute('INSERT INTO routes(part_id,version,created_at,warehouse_slot_id) VALUES(?,?,?,?)',(part['id'],version,stamp(),slot['id']))
-        for seq,(machine,minutes,transition,instructions) in enumerate(checked,1):
-            db().execute('INSERT INTO route_steps(route_id,seq,machine_id,minutes,transition_minutes,instructions) VALUES(?,?,?,?,?,?)',(cur.lastrowid,seq,machine['id'],minutes,transition if seq>1 else 0,instructions))
-        event(None,'Route version created',dict(part=part['code'],version=version))
+        cur=db().execute('INSERT INTO routes(part_id,version,created_at,warehouse_slot_id) VALUES(?,?,?,?)',(part['id'],version,stamp(),slots[0]['id']))
+        db().executemany('INSERT INTO route_warehouse_slots(route_id,slot_id) VALUES(?,?)',[(cur.lastrowid,slot['id']) for slot in slots])
+        for seq,(machine,minutes,transition,instructions,min_minutes) in enumerate(checked,1):
+            db().execute('INSERT INTO route_steps(route_id,seq,machine_id,minutes,transition_minutes,instructions,min_minutes) VALUES(?,?,?,?,?,?,?)',(cur.lastrowid,seq,machine['id'],minutes,transition if seq>1 else 0,instructions,min_minutes))
+        event(None,'Route version created',dict(part=part['code'],version=version,warehouse_slot_ids=[slot['id'] for slot in slots]))
         return jsonify(id=cur.lastrowid,version=version),201
 
     @app.post('/api/orders')
@@ -672,13 +1111,25 @@ def create_app(database=None, testing=False):
         order_id=cur.lastrowid
         steps=rows('SELECT * FROM route_steps WHERE route_id=? ORDER BY seq',(route['id'],))
         require(len(steps)>=3,'This route has no valid steps.')
-        slot=available_slot(data.get('warehouse_slot_id') or route['warehouse_slot_id'],steps[-1]['machine_id'])
-        db().execute('UPDATE orders SET warehouse_slot_id=? WHERE id=?',(slot['id'],order_id))
-        db().execute('INSERT INTO warehouse_reservations(slot_id,order_id,created_at) VALUES(?,?,?)',(slot['id'],order_id,stamp()))
+        requested_slots=data.get('warehouse_slot_ids')
+        if not isinstance(requested_slots,list):
+            requested_slots=[data.get('warehouse_slot_id')] if data.get('warehouse_slot_id') else [r['slot_id'] for r in rows('SELECT slot_id FROM route_warehouse_slots WHERE route_id=? ORDER BY slot_id',(route['id'],))]
+        if not requested_slots:
+            requested_slots=[route['warehouse_slot_id']]
+        slots=available_slots(requested_slots,steps[-1]['machine_id'])
+        db().execute('UPDATE orders SET warehouse_slot_id=? WHERE id=?',(slots[0]['id'],order_id))
+        db().executemany('INSERT INTO warehouse_reservations(slot_id,order_id,created_at) VALUES(?,?,?)',[(slot['id'],order_id,stamp()) for slot in slots])
         for i,offset in enumerate(range(0,quantity,lot_size),1):
             lot=db().execute('INSERT INTO lots(order_id,code,token,quantity) VALUES(?,?,?,?)',(order_id,code+f'-L{i:02}',secrets.token_urlsafe(24),min(lot_size,quantity-offset)))
             for step in steps:
-                db().execute('INSERT INTO operations(lot_id,seq,machine_id,minutes,transition_minutes,instructions) VALUES(?,?,?,?,?,?)',(lot.lastrowid,step['seq'],step['machine_id'],step['minutes'],step['transition_minutes'],step['instructions']))
+                chosen=step['machine_id']
+                if step['seq'] < len(steps):
+                    base=one('SELECT class_code,kind FROM machines WHERE id=?',(step['machine_id'],))
+                    peers=rows('SELECT id FROM machines WHERE class_code=? AND kind=? AND available=1 AND retired=0 ORDER BY id',(base['class_code'],base['kind']))
+                    require(peers,'No active machines are available for this production route.',409)
+                    if peers:
+                        chosen=min(peers,key=lambda m:sum(x['minutes'] for x in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(m['id'],))))['id']
+                db().execute('INSERT INTO operations(lot_id,seq,machine_id,minutes,transition_minutes,instructions,min_minutes) VALUES(?,?,?,?,?,?,?)',(lot.lastrowid,step['seq'],chosen,step['minutes'],step['transition_minutes'],step['instructions'],step['min_minutes']))
             event(lot.lastrowid,'Order created · route confirmed · QR generated',dict(order=code,route_version=route['version'],quantity=min(lot_size,quantity-offset)))
         schedule=forecast(all_operations())
         for op in rows('SELECT x.id FROM operations x JOIN lots l ON l.id=x.lot_id WHERE l.order_id=?',(order_id,)):
@@ -692,10 +1143,15 @@ def create_app(database=None, testing=False):
         orders,_=assemble()
         order=next((o for o in orders if o['id']==order_id),None)
         require(order is not None,'Order not found.',404)
-        require(order['eta'] is not None,'Resolve the hold or unavailable station before approving an ETA.',409)
-        db().execute('UPDATE orders SET approved_eta=? WHERE id=?',(order['eta'],order_id))
-        event(order['lots'][0]['id'],'Client ETA approved',dict(eta=order['eta']))
-        return jsonify(ok=True)
+        require(not order['client_approved_at'],'This client request has already been approved.',409)
+        approved_at=stamp()
+        db().execute('UPDATE orders SET client_approved_at=? WHERE id=?',(approved_at,order_id))
+        schedule=forecast(all_operations())
+        for op in rows("SELECT x.id FROM operations x JOIN lots l ON l.id=x.lot_id WHERE x.status='pending'"):
+            start,end=schedule.get(op['id'],(None,None))
+            db().execute('UPDATE operations SET planned_start=?,planned_end=? WHERE id=?',(start,end,op['id']))
+        event(order['lots'][0]['id'],'Client order approved',dict(approved_at=approved_at))
+        return jsonify(ok=True,approved_at=approved_at)
 
     @app.get('/api/lots/<int:lot_id>/qr')
     @auth('manager','operator')
@@ -728,12 +1184,15 @@ def create_app(database=None, testing=False):
     @app.post('/api/operations/<int:operation_id>/action')
     @auth('operator')
     def operation_action(operation_id):
-        op=one('SELECT x.*,m.kind,m.available FROM operations x JOIN machines m ON m.id=x.machine_id WHERE x.id=?',(operation_id,))
+        op=one('SELECT x.*,m.kind,m.available,m.class_code FROM operations x JOIN machines m ON m.id=x.machine_id WHERE x.id=?',(operation_id,))
         require(op['kind']==g.user['worker_type'],'This operation requires a different job role.',403)
-        require(rows('SELECT 1 FROM assignments WHERE user_id=? AND machine_id=?',(g.user['id'],op['machine_id'])),'This station is not assigned to you.',403)
+        require(g.user['worker_type']!='maintenance','Maintenance staff use the machine repair queue.',403)
+        require(rows('SELECT 1 FROM assignments WHERE user_id=? AND machine_id=?',(g.user['id'],op['machine_id'])),'Select this station in your workspace before working.',403)
         data=request.get_json() or {}
         action=data.get('action')
         if action=='start':
+            require(maybe_one("SELECT id FROM shift_logs WHERE user_id=? AND machine_id=? AND ended_at IS NULL",(g.user['id'],op['machine_id'])) is not None,
+                    'Start your shift on this machine before starting production.',409)
             require(op['status']=='pending','This operation has already started or is on hold. Refresh the lot.',409)
             require(op['available'],'This station is unavailable.',409)
             require(not rows("SELECT 1 FROM operations WHERE lot_id=? AND seq<? AND status!='complete'",(op['lot_id'],op['seq'])),'Complete the preceding route steps first.',409)
@@ -743,10 +1202,35 @@ def create_app(database=None, testing=False):
             queue=sorted([o for o in operations if o['machine_id']==op['machine_id'] and o['status']=='pending' and o['id'] in schedule],key=lambda o:schedule[o['id']][0])
             require(queue and queue[0]['id']==operation_id,'Another lot is scheduled first. Ask the manager to prioritize this lot if needed.',409)
             db().execute("UPDATE operations SET status='running',actual_start=?,operator_id=? WHERE id=?",(stamp(),g.user['id'],operation_id))
+            db().execute('INSERT INTO work_sessions(user_id,machine_id,operation_id,started_at) VALUES(?,?,?,?)',(g.user['id'],op['machine_id'],operation_id,stamp()))
             event(op['lot_id'],'Operation started',dict(operation_id=operation_id,machine_id=op['machine_id']))
+        elif action=='failed':
+            require(op['status']=='running' and op['operator_id']==g.user['id'],'Only your running operation can report a machine failure.',409)
+            reason=text_value(data,'reason',500)
+            schedule_before_failure=forecast(all_operations())
+            waiting_before_failure=rows("SELECT id FROM operations WHERE machine_id=? AND status='pending'",(op['machine_id'],))
+            waiting_before_failure.sort(key=lambda item:(schedule_before_failure.get(item['id'],('~',None))[0] or '~',item['id']))
+            db().execute("UPDATE operations SET status='hold',actual_end=? WHERE id=?",(stamp(),operation_id))
+            db().execute('UPDATE machines SET available=0,unavailable_until=? WHERE id=?',(stamp(utcnow()+timedelta(minutes=10)),op['machine_id']))
+            db().execute('UPDATE work_sessions SET ended_at=? WHERE operation_id=? AND ended_at IS NULL',(stamp(),operation_id))
+            fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',(op['machine_id'],operation_id,g.user['id'],stamp(),reason))
+            event(op['lot_id'],'Machine failure reported',dict(operation_id=operation_id,machine_id=op['machine_id'],fault_id=fault.lastrowid,reason=reason,minimum_downtime_minutes=10))
+            # Move waiting work to the shortest available sister machine, preserving FIFO order through the schedule forecast.
+            sisters=rows('SELECT id FROM machines WHERE class_code=? AND available=1 AND retired=0 AND id<>? ORDER BY id',(op['class_code'],op['machine_id']))
+            for waiting in waiting_before_failure:
+                if not sisters: break
+                def remaining_load(machine):
+                    active=rows("SELECT minutes,actual_start FROM operations WHERE machine_id=? AND status IN ('pending','running')",(machine['id'],))
+                    return sum(max(0,x['minutes']-(utcnow()-dt(x['actual_start'])).total_seconds()/60) if x['actual_start'] else x['minutes'] for x in active)
+                chosen=min(sisters,key=remaining_load)
+                db().execute('UPDATE operations SET machine_id=? WHERE id=?',(chosen['id'],waiting['id']))
+            event(op['lot_id'],'Operation paused for maintenance',dict(machine_id=op['machine_id']))
         elif action=='complete':
             require(op['status']=='running','Only a running operation can be completed.',409)
             require(op['operator_id']==g.user['id'],'The operator who started this operation must complete it.',403)
+            elapsed=(utcnow()-dt(op['actual_start'])).total_seconds()/60
+            if op['kind']!='storage':
+                require(elapsed>=op['min_minutes'],f"Minimum processing time is {op['min_minutes']:g} minutes; {max(0,op['min_minutes']-elapsed):.1f} minutes remain.",409)
             status='complete'
             notes=str(data.get('notes','')).strip()[:2000]
             if op['kind']=='qc':
@@ -756,16 +1240,27 @@ def create_app(database=None, testing=False):
                     status='hold'
                 db().execute('INSERT INTO quality(operation_id,result,notes,user_id,created_at) VALUES(?,?,?,?,?)',(operation_id,data['result'],notes,g.user['id'],stamp()))
             if op['kind']=='storage':
-                planned=one('SELECT o.id,o.warehouse_slot_id FROM orders o JOIN lots l ON l.order_id=o.id WHERE l.id=?',(op['lot_id'],))
-                if planned['warehouse_slot_id']:
-                    slot=one('SELECT row_number,bay_number FROM warehouse_slots WHERE id=?',(planned['warehouse_slot_id'],))
-                    require(rows('SELECT 1 FROM warehouse_reservations WHERE slot_id=? AND order_id=?',(planned['warehouse_slot_id'],planned['id'])),'The warehouse reservation is no longer available.',409)
+                planned=one('SELECT o.id FROM orders o JOIN lots l ON l.order_id=o.id WHERE l.id=?',(op['lot_id'],))
+                reserved=rows('''SELECT s.id,s.row_number,s.bay_number FROM warehouse_reservations r
+                                 JOIN warehouse_slots s ON s.id=r.slot_id
+                                 WHERE r.order_id=? AND s.machine_id=? ORDER BY s.row_number,s.bay_number''',(planned['id'],op['machine_id']))
+                if reserved:
+                    selected=data.get('warehouse_slot_id')
+                    if selected in (None,'') and len(reserved)==1:
+                        selected=reserved[0]['id']
+                    try:
+                        selected=int(selected)
+                    except (TypeError,ValueError):
+                        raise Invalid('Choose one of this order’s reserved warehouse addresses.')
+                    slot=next((s for s in reserved if s['id']==selected),None)
+                    require(slot is not None,'Choose one of this order’s reserved warehouse addresses.')
                     location=f"{slot['row_number']}/{slot['bay_number']}"
                 else:
                     location=text_value(data,'location',120)
                 db().execute('UPDATE lots SET location=? WHERE id=?',(location,op['lot_id']))
                 data['location']=location
             db().execute('UPDATE operations SET status=?,actual_end=? WHERE id=?',(status,stamp(),operation_id))
+            db().execute('UPDATE work_sessions SET ended_at=? WHERE operation_id=? AND ended_at IS NULL',(stamp(),operation_id))
             event(op['lot_id'],'Quality hold' if status=='hold' else 'Operation completed',dict(operation_id=operation_id,machine_id=op['machine_id'],notes=notes,result=data.get('result'),location=data.get('location')))
         else:
             raise Invalid('Unknown operation action.')
@@ -822,6 +1317,7 @@ def seed_demo(app):
         db.executemany('INSERT INTO parts(code,name) VALUES(?,?)',[('PC-001','Precision drive gear'),('PC-002','Bearing housing'),('PC-003','Flanged coupling')])
         for part in range(1,4):
             cur=db.execute('INSERT INTO routes(part_id,version,created_at,warehouse_slot_id) VALUES(?,1,?,?)',(part,stamp(),part))
+            db.execute('INSERT INTO route_warehouse_slots(route_id,slot_id) VALUES(?,?)',(cur.lastrowid,part))
             for seq,(machine,minutes,instructions) in enumerate([(1,30,'Check material and drawing before cutting.'),(2,50,'Verify tool offset and secure the fixture.'),(3,25,'Inspect surface finish and remove burrs.'),(4,15,'Check dimensions against the approved drawing.'),(5,10,'Label the lot and record the rack or bin.')],1):
                 db.execute('INSERT INTO route_steps(route_id,seq,machine_id,minutes,transition_minutes,instructions) VALUES(?,?,?,?,?,?)',(cur.lastrowid,seq,machine,minutes,5 if seq>1 else 0,instructions))
     client=app.test_client()
