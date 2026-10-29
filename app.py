@@ -532,6 +532,16 @@ def create_app(database=None, testing=False):
             pending.remove(op)
         return result
 
+    def forecast_after_repair(fault, ops=None):
+        projected_ops=[dict(op) for op in (ops if ops is not None else all_operations())]
+        for op in projected_ops:
+            if op['id']==fault['operation_id'] and op['status']=='hold':
+                op['status']='pending'
+                op['actual_start']=None
+                op['actual_end']=None
+        ready_at=dt(fault['unavailable_until']) if fault.get('unavailable_until') else utcnow()
+        return projected_ops,forecast(projected_ops,{fault['machine_id']:ready_at})
+
     def assemble():
         ops = all_operations()
         schedule = forecast(ops)
@@ -587,6 +597,8 @@ def create_app(database=None, testing=False):
         orders, ops = assemble()
         if g.user['role'] == 'client':
             safe_orders = []
+            projected_eta_by_lot={}
+            fault_schedule_cache={}
             for order in orders:
                 if order['client_id'] != g.user['id']:
                     continue
@@ -602,6 +614,18 @@ def create_app(database=None, testing=False):
                     if updates:
                         update = updates[0]
                         details = json.loads(update['details'])
+                        fault_id=details.get('fault_id')
+                        if fault_id:
+                            fault=maybe_one("SELECT f.*,m.unavailable_until FROM machine_faults f JOIN machines m ON m.id=f.machine_id WHERE f.id=? AND f.status='open'",(fault_id,))
+                            if fault and fault['repair_minutes'] is not None:
+                                if fault_id not in fault_schedule_cache:
+                                    projected_ops,projected_schedule=forecast_after_repair(fault,ops)
+                                    fault_schedule_cache[fault_id]=(projected_ops,projected_schedule)
+                                projected_ops,projected_schedule=fault_schedule_cache[fault_id]
+                                lot_ends=[projected_schedule[op['id']][1] for op in projected_ops if op['lot_id']==lot['id'] and op['id'] in projected_schedule]
+                                if lot_ends:
+                                    details['eta']=max(lot_ends)
+                                    projected_eta_by_lot[lot['id']]=details['eta']
                         safe['maintenance_updates'].append({'lot_code':lot['code'], 'reason':details.get('reason','Machine maintenance'),
                             'machine_code':details.get('machine_code'), 'machine_name':details.get('machine_name'),
                             'repair_minutes':details.get('repair_minutes'), 'eta':details.get('eta'), 'created_at':update['created_at']})
@@ -614,6 +638,9 @@ def create_app(database=None, testing=False):
                         'stage':tracked['machine_code'] if tracked else lot['stage'],'progress':lot['progress'],
                         'started_at':tracked['actual_start'] if tracked else None,'stopped_at':tracked['actual_end'] if tracked else None,
                         'estimated_minutes':tracked['minutes'] if tracked else None,'progress_complete':bool(tracked and tracked['status']=='complete')})
+                if order['started']:
+                    lot_etas=[projected_eta_by_lot.get(lot['id'],lot['eta']) for lot in order['lots']]
+                    safe['eta']=max(lot_etas) if lot_etas and all(lot_etas) else None
                 safe_orders.append(safe)
             return jsonify(orders=safe_orders, server_time=stamp())
         archive_cutoff=utcnow()-timedelta(days=7)
@@ -1055,13 +1082,7 @@ def create_app(database=None, testing=False):
                     return sum(op['minutes'] for op in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(peer['id'],)))
                 target=min(peers,key=lambda peer:(load(peer),peer['id']))
                 db().execute('UPDATE operations SET machine_id=? WHERE id=?',(target['id'],item['id']))
-        all_ops=all_operations()
-        for op in all_ops:
-            if op['id']==fault['operation_id'] and op['status']=='hold':
-                op['status']='pending'
-                op['actual_start']=None
-                op['actual_end']=None
-        schedule=forecast(all_ops,{fault['machine_id']:dt(until)})
+        all_ops,schedule=forecast_after_repair({**fault,'unavailable_until':until})
         for lot_id in sorted(impacted_lots):
             lot_op_ids=[op['id'] for op in all_ops if op['lot_id']==lot_id]
             last_eta=max((schedule.get(op_id,(None,None))[1] for op_id in lot_op_ids if schedule.get(op_id,(None,None))[1]),default=None)
