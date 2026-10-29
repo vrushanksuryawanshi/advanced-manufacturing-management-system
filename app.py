@@ -1041,7 +1041,7 @@ def create_app(database=None, testing=False):
         db().execute('UPDATE machine_faults SET repair_minutes=? WHERE id=?',(minutes,fault_id))
         db().execute('UPDATE machines SET unavailable_until=? WHERE id=?',(until,fault['machine_id']))
         event(None,'Repair estimate recorded',dict(fault_id=fault_id,repair_minutes=minutes,unavailable_until=until))
-        affected=rows("SELECT x.id,x.lot_id,x.seq,x.created_at FROM operations x WHERE x.machine_id=? AND x.status IN ('pending','hold') ORDER BY x.created_at,x.lot_id,x.seq,x.id",(fault['machine_id'],))
+        affected=rows("SELECT x.id,x.lot_id,x.seq FROM operations x JOIN lots l ON l.id=x.lot_id JOIN orders o ON o.id=l.order_id WHERE x.machine_id=? AND x.status IN ('pending','hold') ORDER BY o.created_at,l.id,x.seq,x.id",(fault['machine_id'],))
         prior_updates=rows("SELECT lot_id,details FROM events WHERE kind='Maintenance delay update' AND lot_id IS NOT NULL")
         impacted_lots={item['lot_id'] for item in affected}
         impacted_lots.update(item['lot_id'] for item in prior_updates if json.loads(item['details']).get('fault_id')==fault_id)
