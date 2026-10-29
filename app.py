@@ -1071,7 +1071,12 @@ def create_app(database=None, testing=False):
         fault=one("SELECT * FROM machine_faults WHERE id=? AND status='open'",(fault_id,))
         machine=one('SELECT * FROM machines WHERE id=?',(fault['machine_id'],))
         require(fault['repair_minutes'] is not None,'Enter a repair time before restarting this machine.',409)
-        require(not machine['unavailable_until'] or dt(machine['unavailable_until'])<=utcnow(),'This machine must stay offline for at least 10 minutes after failure.',409)
+        if machine['unavailable_until'] and dt(machine['unavailable_until'])>utcnow():
+            seconds=max(1,math.ceil((dt(machine['unavailable_until'])-utcnow()).total_seconds()))
+            hours,remainder=divmod(seconds,3600)
+            minutes,seconds=divmod(remainder,60)
+            remaining=' '.join(part for part in (f'{hours}h' if hours else '',f'{minutes}m' if minutes else '',f'{seconds}s' if seconds or not (hours or minutes) else '') if part)
+            raise Invalid(f'Machine can be restarted in {remaining}.',409)
         db().execute('UPDATE machines SET available=1,unavailable_until=NULL WHERE id=?',(machine['id'],))
         db().execute("UPDATE machine_faults SET status='resolved',resolved_at=? WHERE id=?",(stamp(),fault_id))
         if fault['operation_id']:
