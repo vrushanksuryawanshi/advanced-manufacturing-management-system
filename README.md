@@ -125,6 +125,7 @@ Staff register from the sign-in page as a machine operator, quality checker, or 
 - Available, reserved, and occupied address states.
 - Transactional protection against duplicate address reservations.
 - Receipt into the order's reserved address.
+- Clicking a warehouse address shows every lot actually received there, including product, lot code, order, and unit quantity.
 - Dispatch reference and address release after every order lot is stored.
 - Client accounts with generated temporary passwords delivered through STARTTLS SMTP.
 - Client-specific data filtering and manager-approved ETA publication.
@@ -137,6 +138,12 @@ Staff register from the sign-in page as a machine operator, quality checker, or 
 - Planned-versus-actual timestamps, start delay, completion delay, and waiting/transfer time.
 - Historical duration benchmark after five comparable completed observations.
 - Quantity-weighted order progress and dynamically recalculated internal ETA.
+
+### Machine maintenance and FIFO reassignment
+
+When an operator reports a fault, the machine is marked unavailable and its running operation is paused. If another non-retired machine of the same class and work type is available, the interrupted operation is returned to pending and moved with that machine's queued operations. Affected work is ordered by order creation time, lot, route step, and operation ID, then assigned across available sister machines by least queued processing time (machine ID breaks ties). Older work stays ahead of newer work while free capacity is used.
+
+This happens at fault report time through both the worker fault-report action and the operation failure action. If no matching machine is free, the interrupted operation stays on hold and can return to its original machine after maintenance staff enter an estimate and restart it. Work already running on a sister machine is never interrupted. A reassigned operation starts again from the beginning because partial machine-cycle progress is not captured.
 
 ## Quick start
 
@@ -229,7 +236,7 @@ Scan and start the QC step. On completion, record pass or fail. A failure requir
 
 ### Warehouse manager
 
-Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. After every lot in the order is stored, enter the dispatch reference to release the address.
+Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. Open an address on the warehouse grid to see stored product lots, product names, order codes, and quantities. After every lot in the order is stored, enter the dispatch reference to release the address.
 
 ### Client
 
@@ -247,7 +254,7 @@ forecast end   = earliest start + planned minutes per lot
 
 Eligible work is sorted by manager override, order priority, creation time, then stable order/lot/step identifiers. Completed work uses actual timestamps; running work uses actual start plus planned duration; pending work uses the current queues. Held or unavailable routes lose their downstream ETA until resolved.
 
-Scheduling assumes continuous 24/7 station availability. Estimates are per lot, including a smaller final lot. Shift calendars, breaks, maintenance calendars, setup matrices, alternative machines, material constraints, and optimization solvers are not modeled.
+Scheduling assumes continuous 24/7 station availability. Estimates are per lot, including a smaller final lot. Shift calendars, breaks, setup matrices, material constraints, and optimization solvers are not modeled. The system does not proactively balance work across alternative machines during normal production; it reassigns queued and interrupted work to free machines in the same class when a fault is reported.
 
 Machine utilization is recorded busy minutes during the previous 24 hours divided by 1,440. It is not shift-adjusted OEE.
 
@@ -277,6 +284,8 @@ The frontend has no build step. Flask serves static files and the session-based 
 | `orders`, `lots`, `operations` | Demand, traceable batches, route snapshots, plan, and actual work |
 | `quality` | Inspection attempts, result, notes, checker, and time |
 | `warehouse_slots`, `warehouse_reservations` | Address inventory and exclusive order reservations |
+| `machine_faults`, `work_sessions`, `shift_logs` | Fault and repair lifecycle, active work sessions, and worker shifts |
+| `machine_faults`, `work_sessions`, `shift_logs` | Fault and repair lifecycle, active work sessions, and worker shifts |
 | `events` | Auditable operational and management decisions |
 
 Operational data is stored in `instance/manufacturing.db`; the session signing key is `instance/session-key`. Both are excluded from Git.
@@ -291,6 +300,7 @@ The included frontend uses a session-based JSON API. It is an internal applicati
 | Role-filtered workspace | `GET /api/state` |
 | Accounts | `POST /api/users`, `DELETE /api/users/:id`, `PUT /api/users/:id/password`, `POST /api/operators/:id/approve`, `PUT /api/operators/:id/assignment` |
 | Factory | `POST /api/machines`, `DELETE /api/machines/:id`, `POST /api/machines/:id/availability`, `POST /api/warehouses/:id/rows`, `DELETE /api/warehouse-slots/:id` |
+| Maintenance | `POST /api/workers/report-fault`, `POST /api/faults/:id/estimate`, `POST /api/faults/:id/restart` |
 | Products and routes | `POST /api/parts`, `POST /api/routes` |
 | Orders | `POST /api/orders`, `POST /api/orders/:id/approve-eta` |
 | QR and lots | `GET /api/lots/:id/qr`, `GET /api/scan?code=...` |
@@ -372,7 +382,7 @@ Version 1 does not include:
 
 - PLC/CNC/sensor, ERP, accounting, purchasing, or shipping integration.
 - Automatic cycle capture or machine safety controls.
-- Shift/holiday calendars, setup matrices, labor/material capacity, or alternative machines.
+- Shift/holiday calendars, setup matrices, labor/material capacity, or proactive alternative-machine scheduling. Same-class machine reassignment is supported for work affected by a reported fault.
 - Mathematical job-shop optimization or machine-learning prediction.
 - Pause/resume, scrap quantity, post-creation lot split/merge, or partial dispatch.
 - Physical bin capacity, mixed-order storage, inventory valuation, or stock rotation.

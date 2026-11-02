@@ -462,7 +462,7 @@ def create_app(database=None, testing=False):
           LEFT JOIN warehouse_slots ws ON ws.id=o.warehouse_slot_id''')
 
     def warehouse_state():
-        return rows('''SELECT s.*,s.row_number || '/' || s.bay_number address,m.code warehouse_code,
+        slots=rows('''SELECT s.*,s.row_number || '/' || s.bay_number address,m.code warehouse_code,
           r.order_id,o.code order_code,
           CASE WHEN r.order_id IS NULL THEN 'available'
             WHEN EXISTS(SELECT 1 FROM lots l WHERE l.order_id=r.order_id AND l.location=s.row_number || '/' || s.bay_number) THEN 'occupied'
@@ -470,6 +470,36 @@ def create_app(database=None, testing=False):
           FROM warehouse_slots s JOIN machines m ON m.id=s.machine_id
           LEFT JOIN warehouse_reservations r ON r.slot_id=s.id LEFT JOIN orders o ON o.id=r.order_id
           ORDER BY s.machine_id,s.row_number,s.bay_number''')
+        for slot in slots:
+            slot['products']=rows('''SELECT l.id,l.code lot_code,l.quantity,o.code order_code,p.code part_code,p.name part_name
+                FROM lots l JOIN orders o ON o.id=l.order_id JOIN parts p ON p.id=o.part_id
+                JOIN operations x ON x.lot_id=l.id AND x.status='complete'
+                JOIN machines sm ON sm.id=x.machine_id AND sm.kind='storage'
+                WHERE x.machine_id=? AND l.location=?
+                ORDER BY o.created_at,l.id''',(slot['machine_id'],slot['address']))
+        return slots
+
+    def reassign_machine_work(machine_id, interrupted_operation_id=None):
+        """Move affected work to available sister machines in FIFO order."""
+        source=one('SELECT * FROM machines WHERE id=?',(machine_id,))
+        affected=rows('''SELECT x.id,x.minutes,x.actual_start,x.status FROM operations x
+            JOIN lots l ON l.id=x.lot_id JOIN orders o ON o.id=l.order_id
+            WHERE x.machine_id=? AND (x.status='pending' OR x.id=?)
+            ORDER BY o.created_at,l.id,x.seq,x.id''',(machine_id,interrupted_operation_id or -1))
+        peers=rows('''SELECT id FROM machines WHERE class_code=? AND kind=? AND available=1 AND retired=0 AND id<>? ORDER BY id''',
+                   (source['class_code'],source['kind'],machine_id))
+        if not affected or not peers:
+            return 0
+        loads={peer['id']:sum(op['minutes'] for op in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(peer['id'],))) for peer in peers}
+        moved=0
+        for item in affected:
+            target=min(peers,key=lambda peer:(loads[peer['id']],peer['id']))
+            if item['status']=='hold':
+                db().execute("UPDATE operations SET status='pending',actual_start=NULL,actual_end=NULL,operator_id=NULL,machine_id=? WHERE id=?",(target['id'],item['id']))
+            else:
+                db().execute('UPDATE operations SET machine_id=? WHERE id=?',(target['id'],item['id']))
+            loads[target['id']]+=item['minutes']; moved+=1
+        return moved
 
     def available_slot(slot_id, warehouse_id):
         slot=one('SELECT * FROM warehouse_slots WHERE id=?',(slot_id,))
@@ -1058,6 +1088,7 @@ def create_app(database=None, testing=False):
         fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',
                            (machine_id,running['id'] if running else None,g.user['id'],stamp(),reason))
         fault_id=fault.lastrowid
+        reassign_machine_work(machine_id,running['id'] if running else None)
         lot_id=running['lot_id'] if running else None
         event(lot_id,'Machine failure reported',dict(machine_id=machine_id,fault_id=fault_id,operation_id=running['id'] if running else None,
               reason=reason,minimum_downtime_minutes=10))
@@ -1080,22 +1111,13 @@ def create_app(database=None, testing=False):
         prior_updates=rows("SELECT lot_id,details FROM events WHERE kind='Maintenance delay update' AND lot_id IS NOT NULL")
         impacted_lots={item['lot_id'] for item in affected}
         impacted_lots.update(item['lot_id'] for item in prior_updates if json.loads(item['details']).get('fault_id')==fault_id)
-        if minutes >= 120:
-            machine=one('SELECT * FROM machines WHERE id=?',(fault['machine_id'],))
-            peers=rows('SELECT id FROM machines WHERE class_code=? AND kind=? AND available=1 AND retired=0 AND id<>? ORDER BY id',(machine['class_code'],machine['kind'],machine['id']))
-            for item in affected:
-                if not peers: break
-                def load(peer):
-                    return sum(op['minutes'] for op in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(peer['id'],)))
-                target=min(peers,key=lambda peer:(load(peer),peer['id']))
-                db().execute('UPDATE operations SET machine_id=? WHERE id=?',(target['id'],item['id']))
         all_ops,schedule=forecast_after_repair({**fault,'unavailable_until':until})
         for lot_id in sorted(impacted_lots):
             lot_op_ids=[op['id'] for op in all_ops if op['lot_id']==lot_id]
             last_eta=max((schedule.get(op_id,(None,None))[1] for op_id in lot_op_ids if schedule.get(op_id,(None,None))[1]),default=None)
             event(lot_id,'Maintenance delay update',dict(fault_id=fault_id,machine_code=one('SELECT code FROM machines WHERE id=?',(fault['machine_id'],))['code'],
                 machine_name=one('SELECT name FROM machines WHERE id=?',(fault['machine_id'],))['name'],reason=fault['reason'] or 'Unexpected machine maintenance',repair_minutes=minutes,
-                unavailable_until=until,eta=last_eta,reassigned=minutes>=120 and bool(peers) if minutes>=120 else False))
+                unavailable_until=until,eta=last_eta,reassigned=any(op['machine_id']!=fault['machine_id'] for op in all_ops if op['lot_id']==lot_id)))
         return jsonify(ok=True,unavailable_until=until)
 
     @app.post('/api/faults/<int:fault_id>/restart')
@@ -1271,15 +1293,7 @@ def create_app(database=None, testing=False):
             fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',(op['machine_id'],operation_id,g.user['id'],stamp(),reason))
             event(op['lot_id'],'Machine failure reported',dict(operation_id=operation_id,machine_id=op['machine_id'],fault_id=fault.lastrowid,reason=reason,minimum_downtime_minutes=10))
             notify_maintenance_delay(op['machine_id'],fault.lastrowid,reason,[op['lot_id'],*(item['lot_id'] for item in waiting_before_failure)])
-            # Move waiting work to the shortest available sister machine, preserving FIFO order through the schedule forecast.
-            sisters=rows('SELECT id FROM machines WHERE class_code=? AND available=1 AND retired=0 AND id<>? ORDER BY id',(op['class_code'],op['machine_id']))
-            for waiting in waiting_before_failure:
-                if not sisters: break
-                def remaining_load(machine):
-                    active=rows("SELECT minutes,actual_start FROM operations WHERE machine_id=? AND status IN ('pending','running')",(machine['id'],))
-                    return sum(max(0,x['minutes']-(utcnow()-dt(x['actual_start'])).total_seconds()/60) if x['actual_start'] else x['minutes'] for x in active)
-                chosen=min(sisters,key=remaining_load)
-                db().execute('UPDATE operations SET machine_id=? WHERE id=?',(chosen['id'],waiting['id']))
+            reassign_machine_work(op['machine_id'],operation_id)
             event(op['lot_id'],'Operation paused for maintenance',dict(machine_id=op['machine_id']))
         elif action=='complete':
             require(op['status']=='running','Only a running operation can be completed.',409)
