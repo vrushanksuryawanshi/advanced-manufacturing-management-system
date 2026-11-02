@@ -348,11 +348,21 @@ def create_app(database=None, testing=False):
     def send_handover_email(email, name, order, reference, handed_over_at):
         if not app.config['SMTP_HOST'] or not app.config['SMTP_FROM']:
             return False
+        offset=app.config['FACTORY_UTC_OFFSET_MINUTES']
+        local_zone=timezone(timedelta(minutes=offset))
+        local_handover=dt(handed_over_at).astimezone(local_zone)
+        if offset==330:
+            zone_label='IST'
+        else:
+            sign='+' if offset>=0 else '-'
+            hours,minutes=divmod(abs(offset),60)
+            zone_label=f'UTC{sign}{hours:02d}:{minutes:02d}'
+        display_time=f"{local_handover.strftime('%d %b %Y, %I:%M:%S %p')} {zone_label}"
         message=EmailMessage()
         message['Subject']=f"Your order {order['code']} has been handed over"
         message['From']=app.config['SMTP_FROM']
         message['To']=email
-        message.set_content(f"Hello {name},\n\nYour order {order['code']} for {order['quantity']} units of {order['part_name']} has been handed over by the warehouse team.\nHandover reference: {reference}\nHandover time: {handed_over_at}\n\nSign in to your ForgeFlow client workspace to view the update.\n")
+        message.set_content(f"Hello {name},\n\nYour order {order['code']} for {order['quantity']} units of {order['part_name']} has been handed over by the warehouse team.\nHandover reference: {reference}\nHandover time: {display_time}\n\nSign in to your ForgeFlow client workspace to view the update.\n")
         try:
             with smtplib.SMTP(app.config['SMTP_HOST'],app.config['SMTP_PORT'],timeout=20) as server:
                 server.starttls(context=ssl.create_default_context())
