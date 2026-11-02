@@ -126,7 +126,8 @@ Staff register from the sign-in page as a machine operator, quality checker, or 
 - Transactional protection against duplicate address reservations.
 - Receipt into the order's reserved address.
 - Clicking a warehouse address shows every lot actually received there, including product, lot code, order, and unit quantity.
-- Dispatch reference and address release after every order lot is stored.
+- Client handover with a dispatch reference after every order lot is stored; handover releases all addresses reserved by the order, including reserved addresses that were never filled.
+- Lot-level handover events preserve the client, reference, handover time, and last warehouse address for traceability while the warehouse grid marks released space free.
 - Client accounts with generated temporary passwords delivered through STARTTLS SMTP.
 - Client-specific data filtering and manager-approved ETA publication.
 
@@ -236,7 +237,7 @@ Scan and start the QC step. On completion, record pass or fail. A failure requir
 
 ### Warehouse manager
 
-Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. Open an address on the warehouse grid to see stored product lots, product names, order codes, and quantities. After every lot in the order is stored, enter the dispatch reference to release the address.
+Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. Open an address on the warehouse grid to see stored product lots, product names, order codes, and quantities. After every lot in the order is stored, enter the client handover reference. This hands over the complete order and releases every address reserved for it, including unused reserved spaces; lot activity retains the handover and last warehouse location.
 
 ### Client
 

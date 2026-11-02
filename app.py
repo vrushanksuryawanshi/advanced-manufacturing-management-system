@@ -50,7 +50,7 @@ CREATE TABLE IF NOT EXISTS route_steps(id INTEGER PRIMARY KEY, route_id INTEGER 
  machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,min_minutes REAL NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS orders(id INTEGER PRIMARY KEY, code TEXT UNIQUE NOT NULL, client_id INTEGER NOT NULL REFERENCES users(id),
  part_id INTEGER NOT NULL REFERENCES parts(id), route_id INTEGER NOT NULL REFERENCES routes(id), quantity INTEGER NOT NULL,
- priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, client_approved_at TEXT);
+ priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, client_approved_at TEXT, dispatched_at TEXT);
 CREATE TABLE IF NOT EXISTS lots(id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), code TEXT UNIQUE NOT NULL,
  token TEXT UNIQUE NOT NULL, quantity INTEGER NOT NULL, location TEXT);
 CREATE TABLE IF NOT EXISTS operations(id INTEGER PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES lots(id), seq INTEGER NOT NULL,
@@ -86,7 +86,7 @@ CREATE TABLE IF NOT EXISTS route_steps(id SERIAL PRIMARY KEY, route_id INTEGER N
  machine_id INTEGER NOT NULL REFERENCES machines(id), minutes REAL NOT NULL, transition_minutes REAL NOT NULL, instructions TEXT NOT NULL,min_minutes REAL NOT NULL DEFAULT 1);
 CREATE TABLE IF NOT EXISTS orders(id SERIAL PRIMARY KEY, code TEXT UNIQUE NOT NULL, client_id INTEGER NOT NULL REFERENCES users(id),
  part_id INTEGER NOT NULL REFERENCES parts(id), route_id INTEGER NOT NULL REFERENCES routes(id), quantity INTEGER NOT NULL,
- priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id), client_approved_at TEXT);
+ priority INTEGER NOT NULL, due_date TEXT NOT NULL, created_at TEXT NOT NULL, approved_eta TEXT, warehouse_slot_id INTEGER REFERENCES warehouse_slots(id), client_approved_at TEXT, dispatched_at TEXT);
 CREATE TABLE IF NOT EXISTS lots(id SERIAL PRIMARY KEY, order_id INTEGER NOT NULL REFERENCES orders(id), code TEXT UNIQUE NOT NULL,
  token TEXT UNIQUE NOT NULL, quantity INTEGER NOT NULL, location TEXT);
 CREATE TABLE IF NOT EXISTS operations(id SERIAL PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES lots(id), seq INTEGER NOT NULL,
@@ -242,12 +242,13 @@ def create_app(database=None, testing=False):
             conn.execute('ALTER TABLE operations ADD COLUMN IF NOT EXISTS min_minutes REAL NOT NULL DEFAULT 1')
             conn.execute("ALTER TABLE machine_faults ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT ''")
             conn.execute('ALTER TABLE orders ADD COLUMN IF NOT EXISTS client_approved_at TEXT')
+            conn.execute('ALTER TABLE orders ADD COLUMN IF NOT EXISTS dispatched_at TEXT')
             conn.execute('ALTER TABLE users ADD COLUMN IF NOT EXISTS worker_type TEXT NOT NULL DEFAULT \'production\'')
             conn.execute('UPDATE machines SET class_code=code WHERE class_code IS NULL')
             conn.execute('ALTER TABLE warehouse_reservations DROP CONSTRAINT IF EXISTS warehouse_reservations_order_id_key')
         else:
             conn.executescript(SCHEMA)
-            for table, column, definition in (('machines','class_code','TEXT'),('machines','unavailable_until','TEXT'),('machines','retired','INTEGER NOT NULL DEFAULT 0'),('route_steps','min_minutes','REAL NOT NULL DEFAULT 1'),('operations','min_minutes','REAL NOT NULL DEFAULT 1'),('machine_faults','reason',"TEXT NOT NULL DEFAULT ''"),('orders','client_approved_at','TEXT')):
+            for table, column, definition in (('machines','class_code','TEXT'),('machines','unavailable_until','TEXT'),('machines','retired','INTEGER NOT NULL DEFAULT 0'),('route_steps','min_minutes','REAL NOT NULL DEFAULT 1'),('operations','min_minutes','REAL NOT NULL DEFAULT 1'),('machine_faults','reason',"TEXT NOT NULL DEFAULT ''"),('orders','client_approved_at','TEXT'),('orders','dispatched_at','TEXT')):
                 if column not in {r[1] for r in conn.execute(f'PRAGMA table_info({table})')}:
                     conn.execute(f'ALTER TABLE {table} ADD COLUMN {column} {definition}')
             conn.execute('UPDATE machines SET class_code=code WHERE class_code IS NULL')
@@ -465,7 +466,7 @@ def create_app(database=None, testing=False):
         slots=rows('''SELECT s.*,s.row_number || '/' || s.bay_number address,m.code warehouse_code,
           r.order_id,o.code order_code,
           CASE WHEN r.order_id IS NULL THEN 'available'
-            WHEN EXISTS(SELECT 1 FROM lots l WHERE l.order_id=r.order_id AND l.location=s.row_number || '/' || s.bay_number) THEN 'occupied'
+            WHEN EXISTS(SELECT 1 FROM lots l JOIN orders lo ON lo.id=l.order_id WHERE l.order_id=r.order_id AND l.location=s.row_number || '/' || s.bay_number AND lo.dispatched_at IS NULL) THEN 'occupied'
             ELSE 'reserved' END status
           FROM warehouse_slots s JOIN machines m ON m.id=s.machine_id
           LEFT JOIN warehouse_reservations r ON r.slot_id=s.id LEFT JOIN orders o ON o.id=r.order_id
@@ -475,7 +476,7 @@ def create_app(database=None, testing=False):
                 FROM lots l JOIN orders o ON o.id=l.order_id JOIN parts p ON p.id=o.part_id
                 JOIN operations x ON x.lot_id=l.id AND x.status='complete'
                 JOIN machines sm ON sm.id=x.machine_id AND sm.kind='storage'
-                WHERE x.machine_id=? AND l.location=?
+                WHERE x.machine_id=? AND l.location=? AND o.dispatched_at IS NULL
                 ORDER BY o.created_at,l.id''',(slot['machine_id'],slot['address']))
         return slots
 
@@ -598,7 +599,7 @@ def create_app(database=None, testing=False):
             op['completion_delay'] = (dt(op['actual_end'])-dt(op['planned_end'])).total_seconds()/60 if op['actual_end'] and op['planned_end'] else None
         orders = rows('''SELECT o.*,p.code part_code,p.name part_name,u.name client_name,r.version route_version
                          FROM orders o JOIN parts p ON p.id=o.part_id JOIN users u ON u.id=o.client_id JOIN routes r ON r.id=o.route_id ORDER BY o.id DESC''')
-        lots = rows('SELECT * FROM lots ORDER BY id')
+        lots = rows('SELECT l.*,o.dispatched_at FROM lots l JOIN orders o ON o.id=l.order_id ORDER BY l.id')
         for lot in lots:
             lot['operations'] = sorted([o for o in ops if o['lot_id']==lot['id']], key=lambda o:o['seq'])
             for i, op in enumerate(lot['operations']):
@@ -852,9 +853,19 @@ def create_app(database=None, testing=False):
         slot=one('SELECT * FROM warehouse_slots WHERE id=?',(slot_id,))
         require(rows('SELECT 1 FROM assignments WHERE user_id=? AND machine_id=?',(g.user['id'],slot['machine_id'])),'This warehouse is not assigned to you.',403)
         reservation=one('SELECT * FROM warehouse_reservations WHERE slot_id=?',(slot_id,))
-        require(not rows("SELECT x.id FROM operations x JOIN lots l ON l.id=x.lot_id WHERE l.order_id=? AND x.status!='complete'",(reservation['order_id'],)), 'Store every lot in this order before dispatching it.',409)
-        event(None,'Warehouse stock dispatched',dict(slot_id=slot_id,order_id=reservation['order_id'],reference=text_value(request.json,'reference',200)))
-        db().execute('DELETE FROM warehouse_reservations WHERE slot_id=?',(slot_id,))
+        order=one('SELECT * FROM orders WHERE id=?',(reservation['order_id'],))
+        require(order['dispatched_at'] is None,'This order has already been handed over to the client.',409)
+        require(not rows("SELECT x.id FROM operations x JOIN lots l ON l.id=x.lot_id WHERE l.order_id=? AND x.status!='complete'",(order['id'],)), 'Store every lot in this order before handing it over.',409)
+        reference=text_value(request.json or {},'reference',200)
+        reserved=rows('SELECT slot_id FROM warehouse_reservations WHERE order_id=? ORDER BY slot_id',(order['id'],))
+        lots=rows('SELECT id,code,location FROM lots WHERE order_id=? ORDER BY id',(order['id'],))
+        handover_at=stamp()
+        db().execute('UPDATE orders SET dispatched_at=? WHERE id=?',(handover_at,order['id']))
+        for lot in lots:
+            event(lot['id'],'Material handed over to client',dict(order_code=order['code'],last_warehouse_location=lot['location'],reference=reference,handed_over_at=handover_at))
+        event(None,'Warehouse stock dispatched',dict(order_id=order['id'],order_code=order['code'],reference=reference,
+              released_slot_ids=[item['slot_id'] for item in reserved],lot_codes=[lot['code'] for lot in lots],handed_over_at=handover_at))
+        db().execute('DELETE FROM warehouse_reservations WHERE order_id=?',(order['id'],))
         return jsonify(ok=True)
 
     @app.delete('/api/warehouse-slots/<int:slot_id>')
