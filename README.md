@@ -141,9 +141,9 @@ Staff register from the sign-in page as a machine operator, quality checker, or 
 
 ### Machine maintenance and FIFO reassignment
 
-When an operator reports a fault, the machine is marked unavailable and its running operation is paused. If another non-retired machine of the same class and work type is available, the interrupted operation is returned to pending and moved with that machine's queued operations. Affected work is ordered by order creation time, lot, route step, and operation ID, then assigned across available sister machines by least queued processing time (machine ID breaks ties). Older work stays ahead of newer work while free capacity is used.
+When an operator reports a fault, the machine is marked unavailable and its running operation is paused. Work moves immediately only if a non-retired machine of the same class and work type is completely idle, with no running or queued operations. The interrupted operation and pending work are placed there in FIFO order (order creation time, lot, route step, then operation ID).
 
-This happens at fault report time through both the worker fault-report action and the operation failure action. If no matching machine is free, the interrupted operation stays on hold and can return to its original machine after maintenance staff enter an estimate and restart it. Work already running on a sister machine is never interrupted. A reassigned operation starts again from the beginning because partial machine-cycle progress is not captured.
+If no matching machine is completely idle, work waits on the unavailable machine. When maintenance staff enter a repair estimate above two hours, affected queued and interrupted work is reassigned in FIFO order across available machines of the same class, balancing the queue by least queued processing time (machine ID breaks ties). Estimates of two hours or less leave the work waiting for the original machine to return. Work already running on a sister machine is never interrupted. A reassigned operation starts again from the beginning because partial machine-cycle progress is not captured.
 
 ## Quick start
 

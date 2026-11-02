@@ -479,7 +479,7 @@ def create_app(database=None, testing=False):
                 ORDER BY o.created_at,l.id''',(slot['machine_id'],slot['address']))
         return slots
 
-    def reassign_machine_work(machine_id, interrupted_operation_id=None):
+    def reassign_machine_work(machine_id, interrupted_operation_id=None, only_idle=False):
         """Move affected work to available sister machines in FIFO order."""
         source=one('SELECT * FROM machines WHERE id=?',(machine_id,))
         affected=rows('''SELECT x.id,x.minutes,x.actual_start,x.status FROM operations x
@@ -488,6 +488,8 @@ def create_app(database=None, testing=False):
             ORDER BY o.created_at,l.id,x.seq,x.id''',(machine_id,interrupted_operation_id or -1))
         peers=rows('''SELECT id FROM machines WHERE class_code=? AND kind=? AND available=1 AND retired=0 AND id<>? ORDER BY id''',
                    (source['class_code'],source['kind'],machine_id))
+        if only_idle:
+            peers=[peer for peer in peers if not rows("SELECT 1 FROM operations WHERE machine_id=? AND status IN ('pending','running') LIMIT 1",(peer['id'],))]
         if not affected or not peers:
             return 0
         loads={peer['id']:sum(op['minutes'] for op in rows("SELECT minutes FROM operations WHERE machine_id=? AND status IN ('pending','running')",(peer['id'],))) for peer in peers}
@@ -1088,7 +1090,7 @@ def create_app(database=None, testing=False):
         fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',
                            (machine_id,running['id'] if running else None,g.user['id'],stamp(),reason))
         fault_id=fault.lastrowid
-        reassign_machine_work(machine_id,running['id'] if running else None)
+        reassign_machine_work(machine_id,running['id'] if running else None,only_idle=True)
         lot_id=running['lot_id'] if running else None
         event(lot_id,'Machine failure reported',dict(machine_id=machine_id,fault_id=fault_id,operation_id=running['id'] if running else None,
               reason=reason,minimum_downtime_minutes=10))
@@ -1111,13 +1113,17 @@ def create_app(database=None, testing=False):
         prior_updates=rows("SELECT lot_id,details FROM events WHERE kind='Maintenance delay update' AND lot_id IS NOT NULL")
         impacted_lots={item['lot_id'] for item in affected}
         impacted_lots.update(item['lot_id'] for item in prior_updates if json.loads(item['details']).get('fault_id')==fault_id)
+        reassigned_count=0
+        if minutes>120:
+            reassigned_count=reassign_machine_work(fault['machine_id'],fault['operation_id'])
         all_ops,schedule=forecast_after_repair({**fault,'unavailable_until':until})
         for lot_id in sorted(impacted_lots):
             lot_op_ids=[op['id'] for op in all_ops if op['lot_id']==lot_id]
             last_eta=max((schedule.get(op_id,(None,None))[1] for op_id in lot_op_ids if schedule.get(op_id,(None,None))[1]),default=None)
             event(lot_id,'Maintenance delay update',dict(fault_id=fault_id,machine_code=one('SELECT code FROM machines WHERE id=?',(fault['machine_id'],))['code'],
                 machine_name=one('SELECT name FROM machines WHERE id=?',(fault['machine_id'],))['name'],reason=fault['reason'] or 'Unexpected machine maintenance',repair_minutes=minutes,
-                unavailable_until=until,eta=last_eta,reassigned=any(op['machine_id']!=fault['machine_id'] for op in all_ops if op['lot_id']==lot_id)))
+                unavailable_until=until,eta=last_eta,reassigned=any(op['machine_id']!=fault['machine_id'] for op in all_ops if op['lot_id']==lot_id),
+                reassignment_reason='long repair estimate' if reassigned_count else ('free same-class machine' if any(op['machine_id']!=fault['machine_id'] for op in all_ops if op['lot_id']==lot_id) else None)))
         return jsonify(ok=True,unavailable_until=until)
 
     @app.post('/api/faults/<int:fault_id>/restart')
@@ -1293,7 +1299,7 @@ def create_app(database=None, testing=False):
             fault=db().execute('INSERT INTO machine_faults(machine_id,operation_id,reported_by,reported_at,reason) VALUES(?,?,?,?,?)',(op['machine_id'],operation_id,g.user['id'],stamp(),reason))
             event(op['lot_id'],'Machine failure reported',dict(operation_id=operation_id,machine_id=op['machine_id'],fault_id=fault.lastrowid,reason=reason,minimum_downtime_minutes=10))
             notify_maintenance_delay(op['machine_id'],fault.lastrowid,reason,[op['lot_id'],*(item['lot_id'] for item in waiting_before_failure)])
-            reassign_machine_work(op['machine_id'],operation_id)
+            reassign_machine_work(op['machine_id'],operation_id,only_idle=True)
             event(op['lot_id'],'Operation paused for maintenance',dict(machine_id=op['machine_id']))
         elif action=='complete':
             require(op['status']=='running','Only a running operation can be completed.',409)
