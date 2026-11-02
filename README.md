@@ -75,7 +75,7 @@ Every accepted action records the user, lot, operation, time, and relevant decis
 
 | Role | Responsibilities | Boundaries |
 | --- | --- | --- |
-| **Manager** | Configure stations, approve staff, create clients, products, routes and orders, print labels, manage queues and availability, authorize reinspection, approve ETAs, and review analytics | Full operational workspace; managers are created only during initial setup |
+| **Manager** | Configure stations, approve staff, create clients, products, routes and orders, print labels, manage queues and availability, authorize reinspection, approve ETAs, hand over completed warehouse orders, and review analytics | Full operational workspace; managers are created only during initial setup |
 | **Machine operator** | View one assigned machine queue, scan lots, read instructions, and record starts/completions | Cannot skip steps, bypass queues, use another station, or perform QC/storage work |
 | **Quality checker** | Inspect lots at one assigned QC station and record pass/fail with notes | Failed lots remain held until a manager authorizes reinspection |
 | **Warehouse manager** | Receive QC-approved lots into reserved addresses and dispatch complete orders | Acts only on the assigned warehouse |
@@ -126,7 +126,8 @@ Staff register from the sign-in page as a machine operator, quality checker, or 
 - Transactional protection against duplicate address reservations.
 - Receipt into the order's reserved address.
 - Clicking a warehouse address shows every lot actually received there, including product, lot code, order, and unit quantity.
-- Client handover with a dispatch reference after every order lot is stored; handover releases all addresses reserved by the order, including reserved addresses that were never filled.
+- Client handover by a manager or assigned warehouse staff with a dispatch reference after every order lot is stored; handover releases all addresses reserved by the order, including reserved addresses that were never filled.
+- Client portal handover notice plus an email notification when SMTP is configured; notification history remains attached to each lot.
 - Lot-level handover events preserve the client, reference, handover time, and last warehouse address for traceability while the warehouse grid marks released space free.
 - Client accounts with generated temporary passwords delivered through STARTTLS SMTP.
 - Client-specific data filtering and manager-approved ETA publication.
@@ -237,7 +238,7 @@ Scan and start the QC step. On completion, record pass or fail. A failure requir
 
 ### Warehouse manager
 
-Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. Open an address on the warehouse grid to see stored product lots, product names, order codes, and quantities. After every lot in the order is stored, enter the client handover reference. This hands over the complete order and releases every address reserved for it, including unused reserved spaces; lot activity retains the handover and last warehouse location.
+Scan a QC-approved lot, confirm the reserved row/bay shown by the app, and complete storage. Open an address on the warehouse grid to see stored product lots, product names, order codes, and quantities. After every lot in the order is stored, a warehouse manager or manager can enter the client handover reference. This hands over the complete order, notifies the client in the portal and by email when SMTP is configured, and releases every address reserved for it, including unused reserved spaces; lot activity retains the handover and last warehouse location.
 
 ### Client
 

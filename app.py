@@ -345,6 +345,24 @@ def create_app(database=None, testing=False):
                 server.login(app.config['SMTP_USER'], app.config['SMTP_PASSWORD'] or '')
             server.send_message(message)
 
+    def send_handover_email(email, name, order, reference, handed_over_at):
+        if not app.config['SMTP_HOST'] or not app.config['SMTP_FROM']:
+            return False
+        message=EmailMessage()
+        message['Subject']=f"Your order {order['code']} has been handed over"
+        message['From']=app.config['SMTP_FROM']
+        message['To']=email
+        message.set_content(f"Hello {name},\n\nYour order {order['code']} for {order['quantity']} units of {order['part_name']} has been handed over by the warehouse team.\nHandover reference: {reference}\nHandover time: {handed_over_at}\n\nSign in to your ForgeFlow client workspace to view the update.\n")
+        try:
+            with smtplib.SMTP(app.config['SMTP_HOST'],app.config['SMTP_PORT'],timeout=20) as server:
+                server.starttls(context=ssl.create_default_context())
+                if app.config['SMTP_USER']:
+                    server.login(app.config['SMTP_USER'],app.config['SMTP_PASSWORD'] or '')
+                server.send_message(message)
+            return True
+        except (OSError,smtplib.SMTPException):
+            return False
+
     def auth(*roles):
         def decorator(fn):
             @wraps(fn)
@@ -642,6 +660,14 @@ def create_app(database=None, testing=False):
                 safe['eta']=order['eta'] if order['started'] else None
                 safe['stages'] = sorted(set(l['stage'] for l in order['lots'])) if order['started'] else ['Awaiting manufacturing']
                 safe['maintenance_updates'] = []
+                safe['handover'] = None
+                if order['dispatched_at']:
+                    for lot in order['lots']:
+                        handover=maybe_one("SELECT details FROM events WHERE lot_id=? AND kind='Material handed over to client' ORDER BY id DESC LIMIT 1",(lot['id'],))
+                        if handover:
+                            details=json.loads(handover['details'])
+                            safe['handover']={'reference':details.get('reference',''),'handed_over_at':details.get('handed_over_at') or order['dispatched_at']}
+                            break
                 for lot in order['lots']:
                     updates = rows("SELECT details,created_at FROM events WHERE lot_id=? AND kind='Maintenance delay update' ORDER BY id DESC", (lot['id'],))
                     if updates:
@@ -847,11 +873,12 @@ def create_app(database=None, testing=False):
         return jsonify(ok=True),201
 
     @app.post('/api/warehouse-slots/<int:slot_id>/dispatch')
-    @auth('operator')
+    @auth()
     def dispatch_slot(slot_id):
-        require(g.user['worker_type']=='storage','Only warehouse managers can dispatch stock.',403)
+        require(g.user['role']=='manager' or (g.user['role']=='operator' and g.user['worker_type']=='storage'),'Only managers and warehouse staff can hand over stock.',403)
         slot=one('SELECT * FROM warehouse_slots WHERE id=?',(slot_id,))
-        require(rows('SELECT 1 FROM assignments WHERE user_id=? AND machine_id=?',(g.user['id'],slot['machine_id'])),'This warehouse is not assigned to you.',403)
+        if g.user['role']!='manager':
+            require(rows('SELECT 1 FROM assignments WHERE user_id=? AND machine_id=?',(g.user['id'],slot['machine_id'])),'This warehouse is not assigned to you.',403)
         reservation=one('SELECT * FROM warehouse_reservations WHERE slot_id=?',(slot_id,))
         order=one('SELECT * FROM orders WHERE id=?',(reservation['order_id'],))
         require(order['dispatched_at'] is None,'This order has already been handed over to the client.',409)
@@ -866,7 +893,9 @@ def create_app(database=None, testing=False):
         event(None,'Warehouse stock dispatched',dict(order_id=order['id'],order_code=order['code'],reference=reference,
               released_slot_ids=[item['slot_id'] for item in reserved],lot_codes=[lot['code'] for lot in lots],handed_over_at=handover_at))
         db().execute('DELETE FROM warehouse_reservations WHERE order_id=?',(order['id'],))
-        return jsonify(ok=True)
+        client=one('SELECT name,email FROM users WHERE id=?',(order['client_id'],))
+        notified_by_email=send_handover_email(client['email'],client['name'],{**order,'part_name':one('SELECT name FROM parts WHERE id=?',(order['part_id'],))['name']},reference,handover_at)
+        return jsonify(ok=True,client_notified=True,email_sent=notified_by_email)
 
     @app.delete('/api/warehouse-slots/<int:slot_id>')
     @auth('manager')
